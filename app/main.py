@@ -19,7 +19,7 @@ request_logger.setLevel(configured_log_level)
 app = FastAPI(
     title=s.app_name,
     version="0.2.0",
-    description="Local Moodle RAG backend using FastAPI, ChromaDB, and Ollama.",
+    description="Local Moodle RAG backend using FastAPI, ChromaDB, and Geminis.",
     docs_url=None if s.app_env == "production" else "/docs",
     redoc_url=None if s.app_env == "production" else "/redoc",
     openapi_url=None if s.app_env == "production" else "/openapi.json",

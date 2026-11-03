@@ -4,7 +4,7 @@ import threading
 from typing import Optional
 import chromadb
 from app.config import get_settings
-from app.services.ollama_client import embed_texts
+from app.services.gemini_client import embed_texts
 
 _client = None
 _collection = None
@@ -132,7 +132,7 @@ def index_document(
             batch = chunks[offset:offset + 32]
             vectors = embed_texts(
                 [chunk["text"] for chunk in batch],
-                prefix="search_document: ",
+                task_type="RETRIEVAL_DOCUMENT",
             )
 
             ids = []
@@ -326,7 +326,7 @@ def search_course(
 
     embedding = embed_texts(
         [question],
-        prefix="search_query: ",
+        task_type="RETRIEVAL_QUERY",
     )[0]
 
     result = collection.query(
