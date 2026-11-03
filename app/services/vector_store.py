@@ -1,10 +1,9 @@
-
 import hashlib
 import threading
 from typing import Optional
 import chromadb
 from app.config import get_settings
-from app.services.ollama_client import embed_texts
+from app.services.openai_client import embed_texts
 
 _client = None
 _collection = None
@@ -130,10 +129,7 @@ def index_document(
     try:
         for offset in range(0, len(chunks), 32):
             batch = chunks[offset:offset + 32]
-            vectors = embed_texts(
-                [chunk["text"] for chunk in batch],
-                prefix="search_document: ",
-            )
+            vectors = embed_texts([chunk["text"] for chunk in batch])
 
             ids = []
             metadatas = []
@@ -324,10 +320,7 @@ def search_course(
         ]
     }
 
-    embedding = embed_texts(
-        [question],
-        prefix="search_query: ",
-    )[0]
+    embedding = embed_texts([question])[0]
 
     result = collection.query(
         query_embeddings=[embedding],
