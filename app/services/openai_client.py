@@ -1,13 +1,17 @@
 import logging
+import os
+from pathlib import Path
 from typing import Any
 import requests
-from app.config import get_settings
+from dotenv import load_dotenv
 from app.prompt_builder import build_prompt_bundle
 from app.prompt_router import RouteResult
 
 
 logger = logging.getLogger(__name__)
 Message = dict[str, str]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(PROJECT_ROOT / ".env")
 
 # Maximum number of texts sent to the embeddings endpoint in one request.
 EMBED_REQUEST_SIZE = 100
@@ -29,14 +33,14 @@ def log_prompt(messages: list[Message]) -> None:
 
 # send a POST request to the OpenAI API with the given payload
 def _post(path: str, payload: dict[str, Any]) -> requests.Response:
-    settings = get_settings()
-    if not settings.openai_api_key:
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
         raise OpenAIError("OPENAI_API_KEY is not configured on the backend.")
     return requests.post(
-        f"{settings.openai_base_url.rstrip('/')}{path}",
-        headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+        f"{os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1').rstrip('/')}{path}",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json=payload,
-        timeout=settings.openai_timeout_seconds,
+        timeout=int(os.getenv("OPENAI_TIMEOUT_SECONDS", "120")),
     )
 
 # convert a failed HTTP response into an OpenAIError with a short body excerpt
@@ -82,14 +86,18 @@ def _answer_response(response: requests.Response) -> str:
 def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
-    settings = get_settings()
     vectors: list[list[float]] = []
     try:
         for start in range(0, len(texts), EMBED_REQUEST_SIZE):
             batch = texts[start:start + EMBED_REQUEST_SIZE]
             response = _post(
                 "/embeddings",
-                {"model": settings.openai_embed_model, "input": batch},
+                {
+                    "model": os.getenv(
+                        "OPENAI_EMBED_MODEL", "text-embedding-3-small"
+                    ),
+                    "input": batch,
+                },
             )
             response.raise_for_status()
             vectors.extend(_embedding_response(response, len(batch)))
@@ -107,24 +115,25 @@ def generate_answer(
     context: str,
     history: list[dict] | None = None,
 ) -> str:
-    settings = get_settings()
     bundle = build_prompt_bundle(
         route=route,
         context=context,
         history=_history_text(history or []),
     )
     messages = bundle["messages"]
-    if settings.log_prompts:
+    if os.getenv("LOG_PROMPTS", "false").strip().lower() in {"1", "true", "yes", "on"}:
         log_prompt(messages)
 
     payload: dict[str, Any] = {
-        "model": 'gpt-6-luna',
+        "model": os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
         "messages": messages,
     }
-    if settings.openai_temperature >= 0:
-        payload["temperature"] = settings.openai_temperature
-    if settings.openai_max_completion_tokens > 0:
-        payload["max_completion_tokens"] = settings.openai_max_completion_tokens
+    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
+    if temperature >= 0:
+        payload["temperature"] = temperature
+    max_completion_tokens = int(os.getenv("OPENAI_MAX_COMPLETION_TOKENS", "0"))
+    if max_completion_tokens > 0:
+        payload["max_completion_tokens"] = max_completion_tokens
 
     try:
         response = _post("/chat/completions", payload)
