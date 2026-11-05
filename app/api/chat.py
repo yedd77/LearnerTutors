@@ -49,6 +49,7 @@ def ask(request: ChatRequest):
                 ),
                 sources=[],
                 retrieved_chunks=0,
+                retrieved_contexts=[],
             )
 
         # build context and source list for the answer generation
@@ -89,7 +90,9 @@ def ask(request: ChatRequest):
             answer=answer,
             sources=sources,
             retrieved_chunks=len(matches),
+            retrieved_contexts=[m["text"] for m in matches],
         )
+    
     except HTTPException:
         raise
     except OllamaError as exc:

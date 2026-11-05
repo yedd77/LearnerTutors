@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     port: int = 8000
     rag_api_key: str = "replace-with-a-long-random-secret" # The API key for the RAG Assistant
     ollama_base_url: str = "http://127.0.0.1:11434"
-    ollama_chat_model: str = "qwen3:1.7b"
+    ollama_chat_model: str = "qwen2.5:7b-instruct"
     ollama_embed_model: str = "nomic-embed-text"
     ollama_timeout_seconds: int = 180
     chroma_path: str = "./storage/chroma"
@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     max_chunks: int = 2000
     num_ctx: int = 8192
     model_config = SettingsConfigDict(env_file=ROOT / ".env", env_file_encoding="utf-8", extra="ignore")
+    tunnel_url: str = "http://localhost:8000"
 
     # Return the absolute path to the Chroma storage directory, create if not exist
     @property

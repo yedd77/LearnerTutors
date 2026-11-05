@@ -39,7 +39,8 @@ class SourceItem(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     sources: list[SourceItem]
-    retrieved_chunks: int
+    retrieved_chunks: int = 0
+    retrieved_contexts: list[str] = []
 
 # Model for the index response.
 class IndexResponse(BaseModel):
