@@ -4,3 +4,7 @@ __pycache__/
 .env
 storage/
 .pytest_cache/
+eval/output/
+eval/cache/
+eval/results
+eval/test_docs/
