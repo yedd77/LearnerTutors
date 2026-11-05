@@ -1,13 +1,16 @@
+import logging
 from fastapi import APIRouter, HTTPException
 from app.config import get_settings
 from app.schemas import ChatRequest, ChatResponse, SourceItem
 from app.security import RequireApiKey
 from app.services.openai_client import OpenAIError, generate_answer
+from app.services.illustrations import generate_illustration
 from app.services.vector_store import search_course
 from app.prompt_registry import get_tool_menu
 from app.prompt_router import route_message
 
 router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[RequireApiKey])
+logger = logging.getLogger(__name__)
 
 # return a list of supported tools for UI command menu
 @router.get("/tools")
@@ -81,16 +84,32 @@ def ask(request: ChatRequest):
                 sources[source_index].markers.append(f"S{i}")
 
         history = [item.model_dump() for item in request.history]
+        context = "\n\n".join(passages)
         answer = generate_answer(
             route=route,
-            context="\n\n".join(passages),
+            context=context,
             history=history,
         )
+
+        # Only an explicitly selected /explain command produces an illustration.
+        # Image failures are non-fatal: preserve and return the text explanation.
+        illustration_url = None
+        if route.tool.id == "concept_explanation" and route.explicit_command:
+            try:
+                illustration_url = generate_illustration(
+                    question=question,
+                    answer=answer,
+                    context=context,
+                )
+            except Exception:
+                logger.exception("Could not generate the /explain illustration.")
+
         return ChatResponse(
             answer=answer,
             sources=sources,
             retrieved_chunks=len(matches),
             retrieved_contexts=[m["text"] for m in matches],
+            illustration_url=illustration_url,
         )
     
     except HTTPException:
