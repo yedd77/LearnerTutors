@@ -2,7 +2,7 @@ import logging
 import time
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from app.api import chat, documents
+from app.api import chat, documents, illustrations
 from app.config import get_settings
 
 # Init the app 
@@ -28,6 +28,7 @@ app = FastAPI(
 # Include router for API endpoints
 app.include_router(documents.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
+app.include_router(illustrations.router, prefix="/api/v1")
 
 # setup middleware to log requests and responses
 @app.middleware("http")
