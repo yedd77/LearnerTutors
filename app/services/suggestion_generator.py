@@ -117,7 +117,7 @@ def generate_document_suggestions(
         response.raise_for_status()
         raw = response.json().get("message", {}).get("content", "")
         return _parse_suggestions(raw)
-    except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+    except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError) as exc:
         logger.warning(
             "Could not generate suggestions for document '%s': %s",
             filename,
