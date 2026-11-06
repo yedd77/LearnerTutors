@@ -75,7 +75,7 @@ def index_upload(
     except Exception as exc:
         raise HTTPException(502, f"Indexing failed: {exc}") from exc
 
-    # Suggestions are generated only after successful indexing. Local Ollama
+    # Suggestions are generated only after successful indexing. OpenAI
     # failures are non-fatal and must not invalidate the indexed document.
     suggestions = generate_document_suggestions(filename, sections)
 
