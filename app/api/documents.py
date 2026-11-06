@@ -1,12 +1,15 @@
 from pathlib import Path
 from typing import Annotated
+
 from pydantic import BaseModel
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+
 from app.config import get_settings
 from app.schemas import DeleteResponse, IndexResponse
 from app.security import RequireApiKey
 from app.services.chunker import chunk_sections
 from app.services.document_parser import DocumentParseError, extract_sections
+from app.services.suggestion_generator import generate_document_suggestions
 from app.services.vector_store import (
     DocumentCourseConflictError,
     delete_document,
@@ -15,6 +18,7 @@ from app.services.vector_store import (
 )
 
 router = APIRouter(prefix="/documents", tags=["documents"], dependencies=[RequireApiKey])
+
 
 @router.post("/index", response_model=IndexResponse, status_code=201)
 def index_upload(
@@ -27,9 +31,11 @@ def index_upload(
     s = get_settings()
     if visibility not in {"personal", "course"}:
         raise HTTPException(400, "visibility must be 'personal' or 'course'.")
+
     filename = Path(file.filename or "upload").name
     if Path(filename).suffix.lower() not in {".pdf", ".docx", ".pptx", ".txt", ".md"}:
         raise HTTPException(415, "Unsupported file type.")
+
     content_length = file.headers.get("content-length")
     if content_length:
         try:
@@ -38,26 +44,50 @@ def index_upload(
             raise HTTPException(400, "Invalid Content-Length header.") from exc
         if declared_size > s.max_upload_mb * 1024 * 1024:
             raise HTTPException(413, f"File exceeds {s.max_upload_mb} MB.")
+
     content = file.file.read(s.max_upload_mb * 1024 * 1024 + 1)
     file.file.close()
     if len(content) > s.max_upload_mb * 1024 * 1024:
         raise HTTPException(413, f"File exceeds {s.max_upload_mb} MB.")
     if not content:
         raise HTTPException(400, "Uploaded file is empty.")
+
     try:
-        chunks = chunk_sections(extract_sections(filename, content))
+        sections = extract_sections(filename, content)
+        chunks = chunk_sections(sections)
     except DocumentParseError as exc:
         raise HTTPException(422, str(exc)) from exc
+
     if len(chunks) > s.max_chunks:
         raise HTTPException(413, f"File produces more than {s.max_chunks} chunks.")
+
     try:
-        count = index_document(document_id, filename, course_id, owner_id, visibility, chunks)
+        count = index_document(
+            document_id,
+            filename,
+            course_id,
+            owner_id,
+            visibility,
+            chunks,
+        )
     except DocumentCourseConflictError as exc:
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, f"Indexing failed: {exc}") from exc
-    return IndexResponse(document_id=document_id, filename=filename, course_id=course_id,
-                         indexed_chunks=count, status="ready")
+
+    # Suggestions are generated only after successful indexing. OpenAI
+    # failures are non-fatal and must not invalidate the indexed document.
+    suggestions = generate_document_suggestions(filename, sections)
+
+    return IndexResponse(
+        document_id=document_id,
+        filename=filename,
+        course_id=course_id,
+        indexed_chunks=count,
+        status="ready",
+        suggestions=suggestions,
+    )
+
 
 @router.delete("/{document_id}", response_model=DeleteResponse)
 def remove_document(document_id: str, course_id: int):
@@ -69,8 +99,10 @@ def remove_document(document_id: str, course_id: int):
         raise HTTPException(404, "Document not found in this course.")
     return DeleteResponse(document_id=document_id, deleted_chunks=count, status="deleted")
 
+
 class RetrievalToggleRequest(BaseModel):
     enabled: bool
+
 
 @router.patch("/{document_id}/retrieval")
 def toggle_retrieval(

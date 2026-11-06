@@ -40,7 +40,7 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[SourceItem]
     retrieved_chunks: int = 0
-    retrieved_contexts: list[str] = []
+    retrieved_contexts: list[str] = Field(default_factory=list)
     illustration_url: str | None = None
 
 # Model for the index response.
@@ -50,6 +50,7 @@ class IndexResponse(BaseModel):
     course_id: int
     indexed_chunks: int
     status: str
+    suggestions: list[str] = Field(default_factory=list)
 
 # Model for the delete response.
 class DeleteResponse(BaseModel):
