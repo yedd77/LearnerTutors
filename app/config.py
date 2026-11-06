@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_chat_model: str = "gpt-4o-mini"
-    openai_image_model: str = "gpt-image-1"
+    openai_image_model: str = "gpt-image-2.5-flare"
     openai_embed_model: str = "text-embedding-3-small"
     openai_timeout_seconds: int = 120
     # Set to a negative value to omit temperature (some newer models reject it).
