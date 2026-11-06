@@ -33,8 +33,8 @@ def _parse_suggestions(raw: str) -> list[str]:
     """Parse and validate the model's JSON response."""
     text = raw.strip()
     if text.startswith("```"):
-        text = re.sub(r"^\`\`\`(?:json)?\s*", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\s*\`\`\`$", "", text)
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
 
     try:
         payload = json.loads(text)
