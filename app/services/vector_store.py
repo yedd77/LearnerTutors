@@ -30,7 +30,8 @@ def get_collection():
             # models are never compared against one another.
             embedding_provider = settings.embedding_provider.lower()
             embedding_model = settings.resolved_embedding_model
-            identity = f"{embedding_provider}:{embedding_model}"
+            dimension_tag = str(settings.gemini_embed_dimensions) if embedding_provider == "gemini" else "default"
+            identity = f"{embedding_provider}:{embedding_model}:{dimension_tag}"
             suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8]
             model_slug = re.sub(r"[^a-zA-Z0-9_]", "_", embedding_model)[:16].strip("_")
             collection_name = f"{settings.chroma_collection[:25]}_{embedding_provider}_{model_slug}_{suffix}"[:63]
