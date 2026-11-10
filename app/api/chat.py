@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from app.config import get_settings
@@ -16,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 # Each request ID belongs to one active chat-generation task in this worker.
 _active_chat_tasks: dict[str, asyncio.Task] = {}
+# Covers the small race where Stop reaches FastAPI before the chat POST.
+_cancelled_chat_requests: dict[str, float] = {}
 
 
 @router.get("/tools")
@@ -28,7 +31,10 @@ async def cancel_chat(request_id: str):
     """Cancel an active chat generation without exposing provider credentials."""
     task = _active_chat_tasks.get(request_id)
     if task is None or task.done():
-        return {"status": "not_running", "request_id": request_id}
+        # Remember early cancellation for 60 seconds so a chat request that
+        # arrives just after this endpoint cannot start generation.
+        _cancelled_chat_requests[request_id] = time.monotonic() + 60
+        return {"status": "cancelled", "request_id": request_id}
 
     task.cancel()
     logger.info("Cancellation requested for chat request %s", request_id)
@@ -52,6 +58,16 @@ async def ask(request: ChatRequest):
     current_task = asyncio.current_task()
     request_id = request.request_id
     if request_id:
+        now = time.monotonic()
+        expired = [key for key, expiry in _cancelled_chat_requests.items() if expiry <= now]
+        for key in expired:
+            _cancelled_chat_requests.pop(key, None)
+        if _cancelled_chat_requests.pop(request_id, 0) > now:
+            return JSONResponse(status_code=499, content={
+                "detail": "Generation stopped before it started.",
+                "cancelled": True,
+                "request_id": request_id,
+            })
         existing = _active_chat_tasks.get(request_id)
         if existing and not existing.done():
             raise HTTPException(409, "A chat request with this ID is already running.")
