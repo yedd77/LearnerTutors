@@ -1,23 +1,22 @@
 from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
-# Pydantic models for request and response payloads in the RAG Assistant API.
 class ChatHistoryMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(min_length=1, max_length=4000)
 
-# Model for the chat request.
+
 class ChatRequest(BaseModel):
     question: str = Field(min_length=2, max_length=4000)
     course_id: int = Field(gt=0)
     user_id: int = Field(gt=0)
     include_course_documents: bool = True
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=12)
-    # Optional explicit tool selected by Moodle's slash-command UI.
-    # When absent, the backend routes plain-language requests automatically.
     tool_id: str | None = Field(default=None, max_length=80)
+    # Optional until the Moodle frontend starts sending these fields.
+    provider: Literal["openai", "gemini", "ollama"] | None = None
+    model: str | None = Field(default=None, max_length=160)
 
-    # Validate question arent blank
     @field_validator("question")
     @classmethod
     def nonblank(cls, value: str) -> str:
@@ -26,7 +25,12 @@ class ChatRequest(BaseModel):
             raise ValueError("Question cannot be blank.")
         return value
 
-# Model for a source item in the response.
+    @field_validator("model")
+    @classmethod
+    def clean_model(cls, value: str | None) -> str | None:
+        return (value.strip() or None) if value is not None else None
+
+
 class SourceItem(BaseModel):
     document_id: str
     filename: str
@@ -35,7 +39,7 @@ class SourceItem(BaseModel):
     excerpt: str
     markers: list[str]
 
-# Model for the chat response.
+
 class ChatResponse(BaseModel):
     answer: str
     sources: list[SourceItem]
@@ -43,7 +47,7 @@ class ChatResponse(BaseModel):
     retrieved_contexts: list[str] = Field(default_factory=list)
     illustration_url: str | None = None
 
-# Model for the index response.
+
 class IndexResponse(BaseModel):
     document_id: str
     filename: str
@@ -52,7 +56,7 @@ class IndexResponse(BaseModel):
     status: str
     suggestions: list[str] = Field(default_factory=list)
 
-# Model for the delete response.
+
 class DeleteResponse(BaseModel):
     document_id: str
     deleted_chunks: int

@@ -1,13 +1,10 @@
 import hashlib
+import re
 import threading
 from typing import Optional
 import chromadb
 from app.config import get_settings
-<<<<<<< HEAD
-from app.services.openai_client import embed_texts
-=======
-from app.services.gemini_client import embed_texts
->>>>>>> feat/gemini
+from app.services.embedding_provider import embed_texts
 
 _client = None
 _collection = None
@@ -29,9 +26,22 @@ def get_collection():
             _client = chromadb.PersistentClient(
                 path=settings.chroma_absolute_path
             )
+            # Keep each embedding space isolated so vectors from different
+            # models are never compared against one another.
+            embedding_provider = settings.embedding_provider.lower()
+            embedding_model = settings.resolved_embedding_model
+            dimension_tag = str(settings.gemini_embed_dimensions) if embedding_provider == "gemini" else "default"
+            identity = f"{embedding_provider}:{embedding_model}:{dimension_tag}"
+            suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8]
+            model_slug = re.sub(r"[^a-zA-Z0-9_]", "_", embedding_model)[:16].strip("_")
+            collection_name = f"{settings.chroma_collection[:25]}_{embedding_provider}_{model_slug}_{suffix}"[:63]
             _collection = _client.get_or_create_collection(
-                name=settings.chroma_collection,
-                metadata={"hnsw:space": "cosine"},
+                name=collection_name,
+                metadata={
+                    "hnsw:space": "cosine",
+                    "embedding_provider": embedding_provider,
+                    "embedding_model": embedding_model,
+                },
             )
 
         # Preserve retrieval access for chunks indexed before this feature.
@@ -133,14 +143,7 @@ def index_document(
     try:
         for offset in range(0, len(chunks), 32):
             batch = chunks[offset:offset + 32]
-<<<<<<< HEAD
-            vectors = embed_texts([chunk["text"] for chunk in batch])
-=======
-            vectors = embed_texts(
-                [chunk["text"] for chunk in batch],
-                task_type="RETRIEVAL_DOCUMENT",
-            )
->>>>>>> feat/gemini
+            vectors = embed_texts([chunk["text"] for chunk in batch], task_type="RETRIEVAL_DOCUMENT")
 
             ids = []
             metadatas = []
@@ -331,14 +334,7 @@ def search_course(
         ]
     }
 
-<<<<<<< HEAD
-    embedding = embed_texts([question])[0]
-=======
-    embedding = embed_texts(
-        [question],
-        task_type="RETRIEVAL_QUERY",
-    )[0]
->>>>>>> feat/gemini
+    embedding = embed_texts([question], task_type="RETRIEVAL_QUERY")[0]
 
     result = collection.query(
         query_embeddings=[embedding],

@@ -114,6 +114,7 @@ def generate_answer(
     route: RouteResult,
     context: str,
     history: list[dict] | None = None,
+    model: str | None = None,
 ) -> str:
     bundle = build_prompt_bundle(
         route=route,
@@ -125,7 +126,7 @@ def generate_answer(
         log_prompt(messages)
 
     payload: dict[str, Any] = {
-        "model": os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
+        "model": model or settings.openai_chat_model or settings.llm_model,
         "messages": messages,
     }
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))

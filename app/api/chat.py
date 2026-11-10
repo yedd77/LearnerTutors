@@ -90,6 +90,8 @@ def ask(request: ChatRequest):
             route=route,
             context=context,
             history=history,
+            provider=request.provider,
+            model=request.model,
         )
 
         # Only an explicitly selected /explain command produces an illustration.
