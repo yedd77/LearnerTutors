@@ -27,6 +27,7 @@ def index_upload(
     course_id: Annotated[int, Form(gt=0)],
     owner_id: Annotated[int, Form(gt=0)],
     visibility: Annotated[str, Form()] = "personal",
+    retrieval_enabled: Annotated[bool, Form()] = True,
 ):
     s = get_settings()
     if visibility not in {"personal", "course"}:
@@ -69,6 +70,7 @@ def index_upload(
             owner_id,
             visibility,
             chunks,
+            retrieval_enabled=retrieval_enabled,
         )
     except DocumentCourseConflictError as exc:
         raise HTTPException(409, str(exc)) from exc
