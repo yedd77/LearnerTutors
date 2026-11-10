@@ -54,12 +54,18 @@ def update_config(request: RuntimeConfigRequest):
     if values == current_values:
         return {
             "status": "unchanged",
+            "llm_changed": False,
+            "embedding_changed": False,
             "llm_provider": current.llm_provider,
             "llm_model": current.llm_model,
             "embedding_provider": current.embedding_provider,
             "embedding_model": current.resolved_embedding_model,
         }
 
+    llm_changed = (
+        values["llm_provider"] != current.llm_provider
+        or values["llm_model"] != current.llm_model
+    )
     embedding_changed = (
         values["embedding_provider"] != current.embedding_provider
         or values["embedding_model"] != current.embedding_model
@@ -80,8 +86,10 @@ def update_config(request: RuntimeConfigRequest):
             "llm_model": settings.llm_model,
             "embedding_provider": settings.embedding_provider,
             "embedding_model": settings.resolved_embedding_model,
+            "llm_changed": llm_changed,
             "embedding_changed": embedding_changed,
-            "note": "Changing embedding configuration selects a separate Chroma collection. Reindex source documents to populate it." if embedding_changed else None,
+            "reindex_required": llm_changed or embedding_changed,
+            "note": "AI configuration changed. Moodle must reindex stored documents and regenerate their starter suggestions." if (llm_changed or embedding_changed) else None,
         }
     except OSError as exc:
         raise HTTPException(500, f"Could not persist runtime configuration: {exc}") from exc
