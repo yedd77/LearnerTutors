@@ -86,7 +86,12 @@ def generate_document_suggestions(filename: str, sections: list[dict[str, Any]])
             model=None,
             json_mode=True,
         )
-        return _parse_suggestions(raw)
+        suggestions = _parse_suggestions(raw)
+        logger.info(
+            "Generated %d starter suggestions for document '%s' using %s/%s.",
+            len(suggestions), filename, settings.llm_provider, settings.llm_model,
+        )
+        return suggestions
     except (ProviderError, ValueError, TypeError) as exc:
         logger.warning(
             "Could not generate suggestions for document '%s' using %s/%s: %s",
