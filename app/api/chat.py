@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 from app.config import get_settings
 from app.schemas import ChatRequest, ChatResponse, SourceItem
 from app.security import RequireApiKey
+from app.services.gemini_client import GeminiError, generate_answer
 from app.services.openai_client import OpenAIError, generate_answer
 from app.services.illustrations import generate_illustration
 from app.services.vector_store import search_course
@@ -114,6 +115,8 @@ def ask(request: ChatRequest):
     
     except HTTPException:
         raise
+    except GeminiError as exc:
+        raise HTTPException(502, str(exc)) from exc
     except OpenAIError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:

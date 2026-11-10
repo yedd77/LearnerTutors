@@ -37,13 +37,13 @@ def _fill(template: str, **values: str) -> str:
     return re.sub(r"\{(\w+)\}",
             lambda m: values.get(m.group(1), m.group(0)) or "", template)
 
-# build the prompt payload for ollama
+# build the prompt payload for chat model
 def build_prompt_bundle(
     route: RouteResult,
     context: str = "",
     history: str = "",
 ) -> dict:
-    """Build messages for Ollama; context/history must already be authorized by caller."""
+    """Build chat messages for the chat model; context/history must already be authorized by caller."""
     tool = route.tool
     task_path = PROMPT_DIR / "tools" / tool.prompt_file
     template = _read_prompt(str(task_path))

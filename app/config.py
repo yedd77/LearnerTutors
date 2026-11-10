@@ -23,6 +23,17 @@ class Settings(BaseSettings):
     # Optional cap on generated tokens; 0 means no cap.
     openai_max_completion_tokens: int = 0
     rag_api_key: str = "replace-with-a-long-random-secret" # The API key for the RAG Assistant
+    gemini_api_key: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    gemini_chat_model: str = "gemini-3.6-flash"
+    gemini_temperature : float = 0.2
+    gemini_embed_model: str = "gemini-embedding-001"
+    gemini_embed_dimensions: int = 768  # 0 = use the model's default size
+    gemini_timeout_seconds: int = 180
+    # Set to a negative value to omit temperature and use the model default.
+    gemini_temperature: float = 0.2
+    # Optional cap on generated tokens; 0 means no cap.
+    gemini_max_output_tokens: int = 0
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_chat_model: str = "qwen2.5:7b-instruct"
     ollama_embed_model: str = "nomic-embed-text"
