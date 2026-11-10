@@ -83,7 +83,7 @@ def generate_document_suggestions(filename: str, sections: list[dict[str, Any]])
                 {"role": "user", "content": prompt},
             ],
             provider=settings.llm_provider,
-            model=settings.llm_model,
+            model=None,
             json_mode=True,
         )
         return _parse_suggestions(raw)
