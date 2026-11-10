@@ -153,7 +153,7 @@ def generate_messages(messages: list[dict[str, str]], provider: str | None = Non
             from google.genai import types
             if not settings.gemini_api_key:
                 raise ProviderError("GEMINI_API_KEY is not configured.")
-            system = "\\n\\n".join(m["content"] for m in messages if m["role"] == "system")
+            system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
             contents = [types.Content(
                 role="model" if m["role"] == "assistant" else "user",
                 parts=[types.Part(text=m["content"])],
