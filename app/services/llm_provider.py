@@ -138,10 +138,12 @@ def generate_messages(messages: list[dict[str, str]], provider: str | None = Non
             response.raise_for_status()
             answer = response.json()["choices"][0]["message"]["content"]
         elif selected_provider == "ollama":
+            ollama_payload = {"model": selected_model, "messages": messages, "stream": False}
+            if json_mode:
+                ollama_payload["format"] = "json"
             response = requests.post(
                 f"{settings.ollama_base_url.rstrip('/')}/api/chat",
-                json={"model": selected_model, "messages": messages, "stream": False,
-                      "format": "json" if json_mode else ""},
+                json=ollama_payload,
                 timeout=settings.ollama_timeout_seconds,
             )
             response.raise_for_status()
