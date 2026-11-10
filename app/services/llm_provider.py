@@ -30,7 +30,7 @@ def generate_answer(route: RouteResult, context: str, history: list[dict] | None
         "gemini": settings.gemini_chat_model,
         "ollama": settings.ollama_chat_model,
     }
-    selected_model = model or (settings.llm_model if selected_provider == "openai" else defaults.get(selected_provider))
+    selected_model = model or settings.llm_model or defaults.get(selected_provider)
     if selected_provider not in defaults:
         raise ProviderError(f"Unsupported chat provider: {selected_provider}")
     if not selected_model:
@@ -114,7 +114,7 @@ def generate_messages(messages: list[dict[str, str]], provider: str | None = Non
         "gemini": settings.gemini_chat_model,
         "ollama": settings.ollama_chat_model,
     }
-    selected_model = model or (settings.llm_model if selected_provider == "openai" else defaults.get(selected_provider))
+    selected_model = model or settings.llm_model or defaults.get(selected_provider)
     if selected_provider not in defaults:
         raise ProviderError(f"Unsupported generation provider: {selected_provider}")
     if not selected_model:
