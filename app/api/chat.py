@@ -32,7 +32,19 @@ async def cancel_chat(request_id: str):
 
     task.cancel()
     logger.info("Cancellation requested for chat request %s", request_id)
-    return {"status": "cancellation_requested", "request_id": request_id}
+    try:
+        # Wait briefly for the provider client to close its in-flight request.
+        await asyncio.wait_for(asyncio.shield(task), timeout=8)
+    except asyncio.TimeoutError:
+        logger.warning("Chat request %s did not finish cancellation within 8 seconds.", request_id)
+        return {"status": "cancellation_pending", "request_id": request_id}
+    except asyncio.CancelledError:
+        # The request task may propagate cancellation if interrupted during cleanup.
+        pass
+    except Exception:
+        logger.debug("Cancelled chat task %s exited with an error.", request_id, exc_info=True)
+
+    return {"status": "cancelled", "request_id": request_id}
 
 
 @router.post("", response_model=ChatResponse)
