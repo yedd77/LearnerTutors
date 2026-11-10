@@ -3,7 +3,7 @@ import threading
 from typing import Optional
 import chromadb
 from app.config import get_settings
-from app.services.openai_client import embed_texts
+from app.services.embedding_provider import embed_texts
 
 _client = None
 _collection = None
@@ -129,7 +129,7 @@ def index_document(
     try:
         for offset in range(0, len(chunks), 32):
             batch = chunks[offset:offset + 32]
-            vectors = embed_texts([chunk["text"] for chunk in batch])
+            vectors = embed_texts([chunk["text"] for chunk in batch], task_type="RETRIEVAL_DOCUMENT")
 
             ids = []
             metadatas = []
@@ -320,7 +320,7 @@ def search_course(
         ]
     }
 
-    embedding = embed_texts([question])[0]
+    embedding = embed_texts([question], task_type="RETRIEVAL_QUERY")[0]
 
     result = collection.query(
         query_embeddings=[embedding],
