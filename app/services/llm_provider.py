@@ -48,8 +48,6 @@ def generate_answer(route: RouteResult, context: str, history: list[dict] | None
             if not settings.openai_api_key:
                 raise ProviderError("OPENAI_API_KEY is not configured.")
             payload: dict[str, Any] = {"model": selected_model, "messages": messages}
-            if settings.openai_temperature >= 0:
-                payload["temperature"] = settings.openai_temperature
             if settings.openai_max_completion_tokens > 0:
                 payload["max_completion_tokens"] = settings.openai_max_completion_tokens
             response = requests.post(
