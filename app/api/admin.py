@@ -43,13 +43,36 @@ def update_config(request: RuntimeConfigRequest):
     values = request.model_dump()
     if not values["llm_model"]:
         raise HTTPException(422, "A chat model is required.")
+    current = get_settings()
+    current_values = {
+        "llm_provider": current.llm_provider,
+        "llm_model": current.llm_model,
+        "embedding_provider": current.embedding_provider,
+        "embedding_model": current.embedding_model,
+        "gemini_embed_dimensions": current.gemini_embed_dimensions,
+    }
+    if values == current_values:
+        return {
+            "status": "unchanged",
+            "llm_provider": current.llm_provider,
+            "llm_model": current.llm_model,
+            "embedding_provider": current.embedding_provider,
+            "embedding_model": current.resolved_embedding_model,
+        }
+
+    embedding_changed = (
+        values["embedding_provider"] != current.embedding_provider
+        or values["embedding_model"] != current.embedding_model
+        or values["gemini_embed_dimensions"] != current.gemini_embed_dimensions
+    )
     try:
         RUNTIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         temporary = RUNTIME_CONFIG_PATH.with_suffix(".tmp")
         temporary.write_text(json.dumps(values, indent=2), encoding="utf-8")
         temporary.replace(RUNTIME_CONFIG_PATH)
         get_settings.cache_clear()
-        reset_vector_store_cache()
+        if embedding_changed:
+            reset_vector_store_cache()
         settings = get_settings()
         return {
             "status": "updated",
@@ -57,7 +80,8 @@ def update_config(request: RuntimeConfigRequest):
             "llm_model": settings.llm_model,
             "embedding_provider": settings.embedding_provider,
             "embedding_model": settings.resolved_embedding_model,
-            "note": "Changing embedding configuration selects a separate Chroma collection. Reindex source documents to populate it.",
+            "embedding_changed": embedding_changed,
+            "note": "Changing embedding configuration selects a separate Chroma collection. Reindex source documents to populate it." if embedding_changed else None,
         }
     except OSError as exc:
         raise HTTPException(500, f"Could not persist runtime configuration: {exc}") from exc
