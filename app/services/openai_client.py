@@ -106,6 +106,7 @@ def generate_answer(
     route: RouteResult,
     context: str,
     history: list[dict] | None = None,
+    model: str | None = None,
 ) -> str:
     settings = get_settings()
     bundle = build_prompt_bundle(
@@ -118,7 +119,7 @@ def generate_answer(
         log_prompt(messages)
 
     payload: dict[str, Any] = {
-        "model": 'gpt-6-luna',
+        "model": model or settings.openai_chat_model or settings.llm_model,
         "messages": messages,
     }
     if settings.openai_temperature >= 0:
