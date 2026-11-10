@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     openai_image_model: str = "gpt-image-2.5-flare"
     openai_embed_model: str = "text-embedding-3-small"
     openai_timeout_seconds: int = 120
-    openai_temperature: float = 0.2
+    openai_temperature: float = 0
     openai_max_completion_tokens: int = 0
 
     gemini_api_key: str = ""
