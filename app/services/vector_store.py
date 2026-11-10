@@ -1,4 +1,5 @@
 import hashlib
+import re
 import threading
 from typing import Optional
 import chromadb
@@ -25,9 +26,21 @@ def get_collection():
             _client = chromadb.PersistentClient(
                 path=settings.chroma_absolute_path
             )
+            # Keep each embedding space isolated so vectors from different
+            # models are never compared against one another.
+            embedding_provider = settings.embedding_provider.lower()
+            embedding_model = settings.resolved_embedding_model
+            identity = f"{embedding_provider}:{embedding_model}"
+            suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8]
+            model_slug = re.sub(r"[^a-zA-Z0-9_]", "_", embedding_model)[:16].strip("_")
+            collection_name = f"{settings.chroma_collection[:25]}_{embedding_provider}_{model_slug}_{suffix}"[:63]
             _collection = _client.get_or_create_collection(
-                name=settings.chroma_collection,
-                metadata={"hnsw:space": "cosine"},
+                name=collection_name,
+                metadata={
+                    "hnsw:space": "cosine",
+                    "embedding_provider": embedding_provider,
+                    "embedding_model": embedding_model,
+                },
             )
 
         # Preserve retrieval access for chunks indexed before this feature.
