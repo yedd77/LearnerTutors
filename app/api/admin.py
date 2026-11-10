@@ -38,7 +38,7 @@ def read_config():
     }
 
 
-@router.put("/config")
+@router.post("/config")
 def update_config(request: RuntimeConfigRequest):
     values = request.model_dump()
     if not values["llm_model"]:
