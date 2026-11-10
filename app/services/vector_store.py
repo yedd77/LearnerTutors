@@ -11,6 +11,15 @@ _collection = None
 _retrieval_metadata_migrated = False 
 _lock = threading.Lock()
 
+def reset_vector_store_cache() -> None:
+    """Reopen Chroma on the next operation after embedding configuration changes."""
+    global _client, _collection, _retrieval_metadata_migrated
+    with _lock:
+        _client = None
+        _collection = None
+        _retrieval_metadata_migrated = False
+
+
 
 class DocumentCourseConflictError(ValueError):
     """Raised when a document ID is already owned by another course."""

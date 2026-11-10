@@ -94,6 +94,24 @@ class Settings(BaseSettings):
         return defaults.get(self.embedding_provider.lower(), "")
 
 
+RUNTIME_CONFIG_PATH = ROOT / "storage" / "runtime_config.json"
+
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    if RUNTIME_CONFIG_PATH.is_file():
+        try:
+            import json
+            values = json.loads(RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
+            allowed = {
+                "llm_provider", "llm_model",
+                "embedding_provider", "embedding_model",
+                "gemini_embed_dimensions",
+            }
+            overrides = {key: value for key, value in values.items() if key in allowed}
+            if overrides:
+                settings = settings.model_copy(update=overrides)
+        except (OSError, ValueError, TypeError):
+            # Invalid persisted configuration must not prevent the API starting.
+            pass
+    return settings

@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 from app.config import get_settings
 from app.schemas import ChatRequest, ChatResponse, SourceItem
 from app.security import RequireApiKey
+from app.services.llm_provider import ProviderError, generate_answer
 from app.services.illustrations import generate_illustration
 from app.services.llm_provider import ProviderError, generate_answer
 from app.services.vector_store import search_course
