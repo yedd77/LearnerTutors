@@ -16,6 +16,7 @@ class ChatRequest(BaseModel):
     # Optional until the Moodle frontend starts sending these fields.
     provider: Literal["openai", "gemini", "ollama"] | None = None
     model: str | None = Field(default=None, max_length=160)
+    request_id: str | None = Field(default=None, min_length=8, max_length=80)
 
     @field_validator("question")
     @classmethod
