@@ -6,7 +6,7 @@ from app.config import get_settings
 from app.schemas import ChatRequest, ChatResponse, SourceItem
 from app.security import RequireApiKey
 from app.services.llm_provider import ProviderError, generate_answer_async
-from app.services.illustrations import generate_illustration
+from app.services.illustrations import generate_illustration_async
 from app.services.vector_store import search_course
 from app.prompt_registry import get_tool_menu
 from app.prompt_router import route_message
@@ -122,7 +122,7 @@ async def ask(request: ChatRequest):
                 # Illustration generation is a separate synchronous operation.
                 # Check cancellation immediately before starting it.
                 await asyncio.sleep(0)
-                illustration_url = generate_illustration(
+                illustration_url = await generate_illustration_async(
                     question=question,
                     answer=answer,
                     context=context,
