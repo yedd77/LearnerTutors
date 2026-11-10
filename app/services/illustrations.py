@@ -83,3 +83,46 @@ def serve_illustration(image_id: str, expires: int, signature: str) -> FileRespo
     if not path.is_file():
         raise HTTPException(404, "Illustration not found.")
     return FileResponse(path, media_type="image/png", filename="explanation.png")
+
+
+async def generate_illustration_async(question: str, answer: str, context: str) -> str:
+    """Generate an illustration using a cancellable asynchronous HTTP request."""
+    import httpx
+
+    settings = get_settings()
+    if not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured.")
+
+    prompt = (
+        "Create an accurate educational infographic for a university student. "
+        "Use a clear visual hierarchy, diagrams, arrows, stages and concise labels. "
+        "Avoid paragraphs, tiny text, logos, watermarks and unsupported facts. "
+        "Use the supplied course material as the factual source.\n\n"
+        f"Question: {question[:2000]}\n\n"
+        f"Explanation: {answer[:5000]}\n\n"
+        f"Course material: {context[:9000]}"
+    )
+    timeout = max(settings.openai_timeout_seconds, 180)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            f"{settings.openai_base_url.rstrip('/')}/images/generations",
+            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            json={
+                "model": settings.openai_image_model,
+                "prompt": prompt,
+                "size": "1024x1024",
+                "quality": "medium",
+                "output_format": "png",
+                "n": 1,
+            },
+        )
+        response.raise_for_status()
+        encoded = response.json()["data"][0]["b64_json"]
+        image_bytes = base64.b64decode(encoded, validate=True)
+
+    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    image_id = uuid.uuid4().hex
+    (IMAGE_DIR / f"{image_id}.png").write_bytes(image_bytes)
+    expires = int(time.time()) + IMAGE_TTL
+    signature = _signature(image_id, expires)
+    return f"/api/v1/illustrations/{image_id}?expires={expires}&signature={signature}"
