@@ -1,11 +1,12 @@
+import asyncio
 import logging
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from app.config import get_settings
 from app.schemas import ChatRequest, ChatResponse, SourceItem
 from app.security import RequireApiKey
-from app.services.llm_provider import ProviderError, generate_answer
+from app.services.llm_provider import ProviderError, generate_answer_async
 from app.services.illustrations import generate_illustration
-from app.services.llm_provider import ProviderError, generate_answer
 from app.services.vector_store import search_course
 from app.prompt_registry import get_tool_menu
 from app.prompt_router import route_message
@@ -13,14 +14,38 @@ from app.prompt_router import route_message
 router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[RequireApiKey])
 logger = logging.getLogger(__name__)
 
-# return a list of supported tools for UI command menu
+# Each request ID belongs to one active chat-generation task in this worker.
+_active_chat_tasks: dict[str, asyncio.Task] = {}
+
+
 @router.get("/tools")
 def list_tools():
     return {"tools": get_tool_menu()}
 
-# route to handle chat request with retrieval and tool selection
+
+@router.post("/cancel/{request_id}")
+async def cancel_chat(request_id: str):
+    """Cancel an active chat generation without exposing provider credentials."""
+    task = _active_chat_tasks.get(request_id)
+    if task is None or task.done():
+        return {"status": "not_running", "request_id": request_id}
+
+    task.cancel()
+    logger.info("Cancellation requested for chat request %s", request_id)
+    return {"status": "cancellation_requested", "request_id": request_id}
+
+
 @router.post("", response_model=ChatResponse)
-def ask(request: ChatRequest):
+async def ask(request: ChatRequest):
+    current_task = asyncio.current_task()
+    request_id = request.request_id
+    if request_id:
+        existing = _active_chat_tasks.get(request_id)
+        if existing and not existing.done():
+            raise HTTPException(409, "A chat request with this ID is already running.")
+        if current_task is not None:
+            _active_chat_tasks[request_id] = current_task
+
     s = get_settings()
     try:
         route = route_message(request.question, requested_tool_id=request.tool_id)
@@ -31,9 +56,6 @@ def ask(request: ChatRequest):
                 detail="Enter a request after selecting the command, e.g. /exam Create 10 questions.",
             )
 
-        # Retrieval is still course-scoped and uses the existing access filters.
-        # Task-specific retrieval (e.g. separate lecture slides vs past papers)
-        # is not available until document type metadata is added to indexing.
         matches = search_course(
             question,
             request.course_id,
@@ -41,8 +63,6 @@ def ask(request: ChatRequest):
             request.include_course_documents,
             route.tool.top_k or s.top_k,
         )
-        
-        # filter any matches that have retrieval disabled
         matches = [m for m in matches if m["metadata"].get("retrieval_enabled", True)]
         if not matches:
             return ChatResponse(
@@ -56,7 +76,6 @@ def ask(request: ChatRequest):
                 retrieved_contexts=[],
             )
 
-        # build context and source list for the answer generation
         passages, sources, source_indexes = [], [], {}
         for i, match in enumerate(matches, 1):
             meta = match["metadata"]
@@ -86,7 +105,10 @@ def ask(request: ChatRequest):
 
         history = [item.model_dump() for item in request.history]
         context = "\n\n".join(passages)
-        answer = generate_answer(
+
+        # Provider HTTP calls are asynchronous. Cancelling this task closes the
+        # in-flight HTTP request instead of leaving a synchronous worker running.
+        answer = await generate_answer_async(
             route=route,
             context=context,
             history=history,
@@ -94,16 +116,19 @@ def ask(request: ChatRequest):
             model=request.model,
         )
 
-        # Only an explicitly selected /explain command produces an illustration.
-        # Image failures are non-fatal: preserve and return the text explanation.
         illustration_url = None
         if route.tool.id == "concept_explanation" and route.explicit_command:
             try:
+                # Illustration generation is a separate synchronous operation.
+                # Check cancellation immediately before starting it.
+                await asyncio.sleep(0)
                 illustration_url = generate_illustration(
                     question=question,
                     answer=answer,
                     context=context,
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("Could not generate the /explain illustration.")
 
@@ -114,7 +139,14 @@ def ask(request: ChatRequest):
             retrieved_contexts=[m["text"] for m in matches],
             illustration_url=illustration_url,
         )
-    
+
+    except asyncio.CancelledError:
+        logger.info("Chat generation cancelled (request_id=%s)", request_id or "legacy")
+        return JSONResponse(status_code=499, content={
+            "detail": "Generation stopped by the user.",
+            "cancelled": True,
+            "request_id": request_id,
+        })
     except HTTPException:
         raise
     except ProviderError as exc:
@@ -122,4 +154,8 @@ def ask(request: ChatRequest):
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
+        logger.exception("RAG chat request failed.")
         raise HTTPException(500, f"RAG request failed: {exc}") from exc
+    finally:
+        if request_id and _active_chat_tasks.get(request_id) is current_task:
+            _active_chat_tasks.pop(request_id, None)
