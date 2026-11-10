@@ -4,11 +4,10 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
 
-load_dotenv()  
+load_dotenv()
 ROOT = Path(__file__).resolve().parent.parent
-openAI_api_key = os.getenv("OPENAI_API_KEY", "")
 
-# Application settings.
+
 class Settings(BaseSettings):
     app_name: str = "RAG Assistant API"
     app_env: str = "development"
@@ -16,22 +15,39 @@ class Settings(BaseSettings):
     log_prompts: bool = False
     host: str = "127.0.0.1"
     port: int = 8000
-    rag_api_key: str = openAI_api_key
+    rag_api_key: str = os.getenv("RAG_API_KEY", "replace-with-a-long-random-secret")
+
+    # Default text-generation provider/model. Chat requests may override these.
+    llm_provider: str = "openai"
+    llm_model: str = "gpt-4o-luna"
+
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
-    openai_chat_model: str = "gpt-4o-mini"
+    openai_chat_model: str = "gpt-4o-luna"
     openai_image_model: str = "gpt-image-2.5-flare"
     openai_embed_model: str = "text-embedding-3-small"
     openai_timeout_seconds: int = 120
-    # Set to a negative value to omit temperature (some newer models reject it).
     openai_temperature: float = 0.2
-    # Optional cap on generated tokens; 0 means no cap.
     openai_max_completion_tokens: int = 0
-    rag_api_key: str = "replace-with-a-long-random-secret" # The API key for the RAG Assistant
+
+    gemini_api_key: str = ""
+    gemini_chat_model: str = "gemini-3.6-flash"
+    gemini_embed_model: str = "gemini-embedding-001"
+    gemini_embed_dimensions: int = 768
+    gemini_timeout_seconds: int = 180
+    gemini_temperature: float = 0.2
+    gemini_max_output_tokens: int = 0
+
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_chat_model: str = "qwen2.5:7b-instruct"
     ollama_embed_model: str = "nomic-embed-text"
     ollama_timeout_seconds: int = 180
+
+    # Embedding selection is independent from chat generation. The same
+    # provider/model is used for both indexing and query embeddings.
+    embedding_provider: str = "openai"
+    embedding_model: str = ""
+
     chroma_path: str = "./storage/chroma"
     chroma_collection: str = "ragassistant_chunks"
     top_k: int = 5
@@ -40,10 +56,14 @@ class Settings(BaseSettings):
     max_upload_mb: int = 20
     max_pages: int = 300
     max_chunks: int = 2000
-    model_config = SettingsConfigDict(env_file=ROOT / ".env", env_file_encoding="utf-8", extra="ignore")
     tunnel_url: str = "http://localhost:8000"
 
-    # Return the absolute path to the Chroma storage directory, create if not exist
+    model_config = SettingsConfigDict(
+        env_file=ROOT / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
     @property
     def chroma_absolute_path(self) -> str:
         path = Path(self.chroma_path)
@@ -52,7 +72,18 @@ class Settings(BaseSettings):
         path.mkdir(parents=True, exist_ok=True)
         return str(path)
 
-# Get the application settings, cached for performance.
+    @property
+    def resolved_embedding_model(self) -> str:
+        if self.embedding_model.strip():
+            return self.embedding_model.strip()
+        defaults = {
+            "openai": self.openai_embed_model,
+            "gemini": self.gemini_embed_model,
+            "ollama": self.ollama_embed_model,
+        }
+        return defaults.get(self.embedding_provider.lower(), "")
+
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
