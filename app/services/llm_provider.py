@@ -101,3 +101,79 @@ def generate_answer(route: RouteResult, context: str, history: list[dict] | None
         raise ProviderError(f"{selected_provider} returned HTTP {exc.response.status_code if exc.response else 'unknown'}: {body}") from exc
     except Exception as exc:
         raise ProviderError(f"{selected_provider} chat request failed: {type(exc).__name__}: {exc}") from exc
+
+
+
+def generate_messages(messages: list[dict[str, str]], provider: str | None = None,
+                      model: str | None = None, json_mode: bool = False) -> str:
+    """Generate text from a provider using the configured default when omitted."""
+    settings = get_settings()
+    selected_provider = (provider or settings.llm_provider).lower()
+    defaults = {
+        "openai": settings.openai_chat_model or settings.llm_model,
+        "gemini": settings.gemini_chat_model,
+        "ollama": settings.ollama_chat_model,
+    }
+    selected_model = model or (settings.llm_model if selected_provider == "openai" else defaults.get(selected_provider))
+    if selected_provider not in defaults:
+        raise ProviderError(f"Unsupported generation provider: {selected_provider}")
+    if not selected_model:
+        raise ProviderError(f"No model configured for provider '{selected_provider}'.")
+    try:
+        if selected_provider == "openai":
+            if not settings.openai_api_key:
+                raise ProviderError("OPENAI_API_KEY is not configured.")
+            payload: dict[str, Any] = {"model": selected_model, "messages": messages}
+            if json_mode:
+                payload["response_format"] = {"type": "json_object"}
+            if settings.openai_temperature >= 0:
+                payload["temperature"] = settings.openai_temperature
+            if settings.openai_max_completion_tokens > 0:
+                payload["max_completion_tokens"] = settings.openai_max_completion_tokens
+            response = requests.post(
+                f"{settings.openai_base_url.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                json=payload, timeout=settings.openai_timeout_seconds,
+            )
+            response.raise_for_status()
+            answer = response.json()["choices"][0]["message"]["content"]
+        elif selected_provider == "ollama":
+            response = requests.post(
+                f"{settings.ollama_base_url.rstrip('/')}/api/chat",
+                json={"model": selected_model, "messages": messages, "stream": False,
+                      "format": "json" if json_mode else ""},
+                timeout=settings.ollama_timeout_seconds,
+            )
+            response.raise_for_status()
+            answer = response.json()["message"]["content"]
+        else:
+            from google import genai
+            from google.genai import types
+            if not settings.gemini_api_key:
+                raise ProviderError("GEMINI_API_KEY is not configured.")
+            system = "\\n\\n".join(m["content"] for m in messages if m["role"] == "system")
+            contents = [types.Content(
+                role="model" if m["role"] == "assistant" else "user",
+                parts=[types.Part(text=m["content"])],
+            ) for m in messages if m["role"] != "system"]
+            client = genai.Client(api_key=settings.gemini_api_key)
+            response = client.models.generate_content(
+                model=selected_model, contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=system or None,
+                    response_mime_type="application/json" if json_mode else None,
+                    temperature=settings.gemini_temperature if settings.gemini_temperature >= 0 else None,
+                    max_output_tokens=settings.gemini_max_output_tokens or None,
+                ),
+            )
+            answer = response.text
+        if not isinstance(answer, str) or not answer.strip():
+            raise ProviderError(f"{selected_provider} returned an empty response.")
+        return answer.strip()
+    except ProviderError:
+        raise
+    except requests.HTTPError as exc:
+        body = exc.response.text[:1000] if exc.response is not None else str(exc)
+        raise ProviderError(f"{selected_provider} returned HTTP {exc.response.status_code if exc.response else 'unknown'}: {body}") from exc
+    except Exception as exc:
+        raise ProviderError(f"{selected_provider} generation failed: {type(exc).__name__}: {exc}") from exc
