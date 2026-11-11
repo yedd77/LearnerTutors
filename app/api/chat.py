@@ -84,12 +84,22 @@ async def ask(request: ChatRequest):
                 detail="Enter a request after selecting the command, e.g. /exam Create 10 questions.",
             )
 
-        matches = search_course(
+        retrieval_started = time.perf_counter()
+        # Embedding requests use synchronous HTTP clients. Run retrieval in a worker
+        # thread so they do not block FastAPI's event loop or concurrent cancel calls.
+        matches = await asyncio.to_thread(
+            search_course,
             question,
             request.course_id,
             request.user_id,
             request.include_course_documents,
             route.tool.top_k or s.top_k,
+        )
+        logger.info(
+            "RAG retrieval completed in %.3fs (course=%s, chunks=%s).",
+            time.perf_counter() - retrieval_started,
+            request.course_id,
+            len(matches),
         )
         matches = [m for m in matches if m["metadata"].get("retrieval_enabled", True)]
         if not matches:
@@ -136,12 +146,19 @@ async def ask(request: ChatRequest):
 
         # Provider HTTP calls are asynchronous. Cancelling this task closes the
         # in-flight HTTP request instead of leaving a synchronous worker running.
+        generation_started = time.perf_counter()
         answer = await generate_answer_async(
             route=route,
             context=context,
             history=history,
             provider=request.provider,
             model=request.model,
+        )
+        logger.info(
+            "LLM generation completed in %.3fs (provider=%s, model=%s).",
+            time.perf_counter() - generation_started,
+            request.provider or s.llm_provider,
+            request.model or s.llm_model,
         )
 
         illustration_url = None
