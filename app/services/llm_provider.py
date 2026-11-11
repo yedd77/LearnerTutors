@@ -125,8 +125,9 @@ def generate_messages(messages: list[dict[str, str]], provider: str | None = Non
             payload: dict[str, Any] = {"model": selected_model, "messages": messages}
             if json_mode:
                 payload["response_format"] = {"type": "json_object"}
-            if settings.openai_temperature >= 0:
-                payload["temperature"] = settings.openai_temperature
+            # Omit temperature for OpenAI-compatible reasoning models that only
+            # support the API default (temperature=1). Explicit values such as
+            # 0.0 can cause the request to be rejected even when chat works.
             if settings.openai_max_completion_tokens > 0:
                 payload["max_completion_tokens"] = settings.openai_max_completion_tokens
             response = requests.post(
