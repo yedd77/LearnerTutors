@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from fastapi import APIRouter, HTTPException
 from app.config import get_settings
 from app.schemas import ChatRequest, ChatResponse, SourceItem
@@ -32,7 +33,7 @@ async def ask(request: ChatRequest):
 
         retrieval_started = time.perf_counter()
         # Embedding requests use synchronous HTTP clients. Run retrieval in a worker
-        # thread so they do not block FastAPI's event loop or concurrent cancel calls.
+        # thread so they do not block FastAPI's event loop.
         matches = await asyncio.to_thread(
             search_course,
             question,
