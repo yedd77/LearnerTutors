@@ -66,10 +66,15 @@ def update_config(request: RuntimeConfigRequest):
         values["llm_provider"] != current.llm_provider
         or values["llm_model"] != current.llm_model
     )
+    # Only settings that change the vector space invalidate existing document
+    # embeddings. Chat-generation settings must never trigger a document rebuild.
     embedding_changed = (
         values["embedding_provider"] != current.embedding_provider
         or values["embedding_model"] != current.embedding_model
-        or values["gemini_embed_dimensions"] != current.gemini_embed_dimensions
+        or (
+            values["embedding_provider"] == "gemini"
+            and values["gemini_embed_dimensions"] != current.gemini_embed_dimensions
+        )
     )
     try:
         RUNTIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -88,8 +93,14 @@ def update_config(request: RuntimeConfigRequest):
             "embedding_model": settings.resolved_embedding_model,
             "llm_changed": llm_changed,
             "embedding_changed": embedding_changed,
-            "reindex_required": llm_changed or embedding_changed,
-            "note": "AI configuration changed. Moodle must reindex stored documents and regenerate their starter suggestions." if (llm_changed or embedding_changed) else None,
+            "reindex_required": embedding_changed,
+            "note": (
+                "Embedding configuration changed. Moodle must reindex stored documents."
+                if embedding_changed
+                else "Chat-generation configuration changed. Existing document embeddings remain valid."
+                if llm_changed
+                else None
+            ),
         }
     except OSError as exc:
         raise HTTPException(500, f"Could not persist runtime configuration: {exc}") from exc
