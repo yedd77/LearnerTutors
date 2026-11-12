@@ -1,6 +1,8 @@
 import hashlib
+import logging
 import re
 import threading
+import time
 from typing import Optional
 import chromadb
 from app.config import get_settings
@@ -10,6 +12,7 @@ _client = None
 _collection = None
 _retrieval_metadata_migrated = False 
 _lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
 def reset_vector_store_cache() -> None:
     """Reopen Chroma on the next operation after embedding configuration changes."""
@@ -31,6 +34,7 @@ def get_collection():
 
     with _lock:
         if _collection is None:
+            initialization_started = time.perf_counter()
             settings = get_settings()
             _client = chromadb.PersistentClient(
                 path=settings.chroma_absolute_path
@@ -52,11 +56,24 @@ def get_collection():
                     "embedding_model": embedding_model,
                 },
             )
+            logger.info(
+                "Chroma collection opened name=%s provider=%s model=%s duration_ms=%.2f",
+                collection_name,
+                embedding_provider,
+                embedding_model,
+                (time.perf_counter() - initialization_started) * 1000,
+            )
 
         # Preserve retrieval access for chunks indexed before this feature.
         if not _retrieval_metadata_migrated:
+            migration_started = time.perf_counter()
+            logger.info("Chroma metadata migration started.")
             _migrate_retrieval_metadata(_collection)
             _retrieval_metadata_migrated = True
+            logger.info(
+                "Chroma metadata migration finished duration_ms=%.2f",
+                (time.perf_counter() - migration_started) * 1000,
+            )
 
     return _collection
 
@@ -320,9 +337,6 @@ def search_course(
     """Search only enabled chunks the user is allowed to access."""
     collection = get_collection()
 
-    if collection.count() == 0:
-        return []
-
     visibility = [
         {
             "$and": [
@@ -343,8 +357,16 @@ def search_course(
         ]
     }
 
+    embedding_started = time.perf_counter()
     embedding = embed_texts([question], task_type="RETRIEVAL_QUERY")[0]
+    logger.info(
+        "Retrieval query embedding finished provider=%s model=%s duration_ms=%.2f",
+        get_settings().embedding_provider,
+        get_settings().resolved_embedding_model,
+        (time.perf_counter() - embedding_started) * 1000,
+    )
 
+    query_started = time.perf_counter()
     result = collection.query(
         query_embeddings=[embedding],
         n_results=max(1, min(top_k, 20)),
