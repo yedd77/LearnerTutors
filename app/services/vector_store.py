@@ -167,8 +167,10 @@ def index_document(
     total = 0
 
     try:
-        for offset in range(0, len(chunks), 32):
-            batch = chunks[offset:offset + 32]
+        # Match the embedding provider's 100-input request batch to avoid
+        # paying a full network round-trip for multiple small Chroma writes.
+        for offset in range(0, len(chunks), 100):
+            batch = chunks[offset:offset + 100]
             vectors = embed_texts([chunk["text"] for chunk in batch], task_type="RETRIEVAL_DOCUMENT")
 
             ids = []
