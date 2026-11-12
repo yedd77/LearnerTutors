@@ -63,7 +63,8 @@ async def warm_vector_store():
 async def log_requests(request, call_next):
     """Attach a correlation ID and log every request without logging secrets."""
     started = time.perf_counter()
-    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+    request_id = uuid.uuid4().hex
+    status_code = "error"
     request.state.request_id = request_id
     client_host = request.client.host if request.client else "unknown"
 
@@ -77,6 +78,7 @@ async def log_requests(request, call_next):
 
     try:
         response = await call_next(request)
+        status_code = response.status_code
         response.headers["X-Request-ID"] = request_id
         return response
     except Exception:
@@ -89,10 +91,11 @@ async def log_requests(request, call_next):
         raise
     finally:
         request_logger.info(
-            "request.finish id=%s method=%s path=%s duration_ms=%.2f",
+            "request.finish id=%s method=%s path=%s status=%s duration_ms=%.2f",
             request_id,
             request.method,
             request.url.path,
+            status_code,
             (time.perf_counter() - started) * 1000,
         )
 
