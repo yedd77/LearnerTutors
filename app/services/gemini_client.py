@@ -152,7 +152,7 @@ def generate_answer(
     )
     try:
         response = _client().models.generate_content(
-            model=_model_id(settings.gemini_chat_model),
+            model=_model_id(settings.llm_model),
             contents=contents,
             config=config,
         )
