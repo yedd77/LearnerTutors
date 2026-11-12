@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     chroma_path: str = "./storage/chroma"
     chroma_collection: str = "ragassistant_chunks"
     top_k: int = 5
+    # Dedicated worker pool for synchronous Chroma and embedding retrieval.
+    retrieval_workers: int = 64
     chunk_size: int = 900
     chunk_overlap: int = 150
     max_upload_mb: int = 20
