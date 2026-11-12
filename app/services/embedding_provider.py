@@ -81,6 +81,7 @@ def embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> list
         )
         return vectors
     except EmbeddingError:
+        logger.exception("embedding.failed provider=%s model=%s", provider, model)
         raise
     except requests.HTTPError as exc:
         logger.exception("embedding.http_error provider=%s model=%s", provider, model)
