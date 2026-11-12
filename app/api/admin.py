@@ -16,11 +16,8 @@ class RuntimeConfigRequest(BaseModel):
     llm_provider: Literal["openai", "gemini", "ollama"]
     llm_model: str = Field(min_length=1, max_length=160)
     image_model: str = Field(default="", max_length=160)
-    embedding_provider: Literal["openai", "gemini", "ollama"] = "openai"
-    embedding_model: str = Field(default="", max_length=160)
-    gemini_embed_dimensions: int = Field(default=768, ge=0, le=3072)
 
-    @field_validator("llm_model", "image_model", "embedding_model")
+    @field_validator("llm_model", "image_model")
     @classmethod
     def strip_model(cls, value: str) -> str:
         return value.strip()
@@ -50,9 +47,6 @@ def update_config(request: RuntimeConfigRequest):
         "llm_provider": current.llm_provider,
         "llm_model": current.llm_model,
         "image_model": current.image_model,
-        "embedding_provider": current.embedding_provider,
-        "embedding_model": current.embedding_model,
-        "gemini_embed_dimensions": current.gemini_embed_dimensions,
     }
     if values == current_values:
         return {
@@ -72,14 +66,9 @@ def update_config(request: RuntimeConfigRequest):
     )
     # Only settings that change the vector space invalidate existing document
     # embeddings. Chat-generation settings must never trigger a document rebuild.
-    embedding_changed = (
-        values["embedding_provider"] != current.embedding_provider
-        or values["embedding_model"] != current.embedding_model
-        or (
-            values["embedding_provider"] == "gemini"
-            and values["gemini_embed_dimensions"] != current.gemini_embed_dimensions
-        )
-    )
+    # Embedding settings are backend-owned (.env), never accepted from Moodle.
+    # Changing chat/image generation configuration cannot invalidate vectors.
+    embedding_changed = False
     try:
         RUNTIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         temporary = RUNTIME_CONFIG_PATH.with_suffix(".tmp")
