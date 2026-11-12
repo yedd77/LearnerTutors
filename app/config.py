@@ -29,13 +29,6 @@ class Settings(BaseSettings):
     openai_max_completion_tokens: int = 0
 
     gemini_api_key: str = ""
-    gemini_embed_model: str = "gemini-embedding-001"
-    gemini_embed_dimensions: int = 768
-    gemini_timeout_seconds: int = 180
-    gemini_temperature: float = 0.2
-    gemini_max_output_tokens: int = 0
-
-    gemini_api_key: str = ""
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     gemini_temperature : float = 0.2
     gemini_embed_model: str = "gemini-embedding-001"
