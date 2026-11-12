@@ -96,8 +96,6 @@ def get_settings() -> Settings:
             values = json.loads(RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
             allowed = {
                 "llm_provider", "llm_model", "image_model",
-                "embedding_provider", "embedding_model",
-                "gemini_embed_dimensions",
             }
             overrides = {key: value for key, value in values.items() if key in allowed}
             if overrides:
