@@ -31,6 +31,7 @@ def index_upload(
     owner_id: Annotated[int, Form(gt=0)],
     visibility: Annotated[str, Form()] = "personal",
     retrieval_enabled: Annotated[bool, Form()] = True,
+    generate_suggestions: Annotated[bool, Form()] = True,
 ):
     s = get_settings()
     if visibility not in {"personal", "course"}:
@@ -103,17 +104,18 @@ def index_upload(
 
     # Suggestions are generated only after successful indexing. OpenAI
     # failures are non-fatal and must not invalidate the indexed document.
-    suggestions_started = time.perf_counter()
-    try:
-        suggestions = generate_document_suggestions(filename, sections)
-        logger.info(
-            "document.suggestions.finish document=%s suggestions=%s duration_ms=%.2f",
-            document_id, len(suggestions),
-            (time.perf_counter() - suggestions_started) * 1000,
-        )
-    except Exception:
-        logger.exception("document.suggestions.error document=%s", document_id)
-        suggestions = []
+    suggestions = []
+    if generate_suggestions:
+        suggestions_started = time.perf_counter()
+        try:
+            suggestions = generate_document_suggestions(filename, sections)
+            logger.info(
+                "document.suggestions.finish document=%s suggestions=%s duration_ms=%.2f",
+                document_id, len(suggestions),
+                (time.perf_counter() - suggestions_started) * 1000,
+            )
+        except Exception:
+            logger.exception("document.suggestions.error document=%s", document_id)
 
     logger.info(
         "document.index.finish document=%s total_ms=%.2f",
@@ -127,6 +129,45 @@ def index_upload(
         status="ready",
         suggestions=suggestions,
     )
+
+
+class SuggestionResponse(BaseModel):
+    document_id: str
+    suggestions: list[str]
+
+
+@router.post("/suggestions", response_model=SuggestionResponse)
+def regenerate_suggestions(
+    file: Annotated[UploadFile, File()],
+    document_id: Annotated[str, Form(min_length=1, max_length=100)],
+):
+    """Generate starter questions for a document without changing its vectors."""
+    settings = get_settings()
+    started = time.perf_counter()
+    filename = Path(file.filename or "upload").name
+    if Path(filename).suffix.lower() not in {".pdf", ".docx", ".pptx", ".txt", ".md"}:
+        raise HTTPException(415, "Unsupported file type.")
+
+    content = file.file.read(settings.max_upload_mb * 1024 * 1024 + 1)
+    file.file.close()
+    if len(content) > settings.max_upload_mb * 1024 * 1024:
+        raise HTTPException(413, f"File exceeds {settings.max_upload_mb} MB.")
+    if not content:
+        raise HTTPException(400, "Uploaded file is empty.")
+
+    try:
+        sections = extract_sections(filename, content)
+    except DocumentParseError as exc:
+        logger.warning("document.suggestions.parse_error document=%s filename=%s error=%s",
+                       document_id, filename, exc)
+        raise HTTPException(422, str(exc)) from exc
+
+    suggestions = generate_document_suggestions(filename, sections)
+    logger.info(
+        "document.suggestions_only.finish document=%s suggestions=%s duration_ms=%.2f",
+        document_id, len(suggestions), (time.perf_counter() - started) * 1000,
+    )
+    return SuggestionResponse(document_id=document_id, suggestions=suggestions)
 
 
 @router.delete("/{document_id}", response_model=DeleteResponse)
