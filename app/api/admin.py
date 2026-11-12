@@ -1,100 +1,108 @@
-import json
+from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from dotenv import load_dotenv
+import os
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field, field_validator
+load_dotenv()
+ROOT = Path(__file__).resolve().parent.parent
 
-from app.config import RUNTIME_CONFIG_PATH, get_settings
-from app.security import RequireApiKey
-from app.services.vector_store import reset_vector_store_cache
+class Settings(BaseSettings):
+    app_name: str = "RAG Assistant API"
+    app_env: str = "development"
+    log_level: str = "INFO"
+    log_prompts: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8000
+    rag_api_key: str = os.getenv("RAG_API_KEY", "replace-with-a-long-random-secret")
 
-router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[RequireApiKey])
+    # Text-generation selection is supplied by Moodle and persisted at runtime.
+    llm_provider: str = Field(default="", validation_alias="MOODLE_RUNTIME_LLM_PROVIDER")
+    llm_model: str = Field(default="", validation_alias="MOODLE_RUNTIME_LLM_MODEL")
+    image_model: str = Field(default="", validation_alias="MOODLE_RUNTIME_IMAGE_MODEL")
 
+    openai_api_key: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_embed_model: str = "text-embedding-3-small"
+    openai_timeout_seconds: int = 120
+    openai_temperature: float = 0
+    openai_max_completion_tokens: int = 0
 
-class RuntimeConfigRequest(BaseModel):
-    llm_provider: Literal["openai", "gemini", "ollama"]
-    llm_model: str = Field(min_length=1, max_length=160)
-    image_model: str = Field(default="", max_length=160)
+    gemini_api_key: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    gemini_embed_model: str = "gemini-embedding-001"
+    gemini_embed_dimensions: int = 768  # 0 = use the model's default size
+    gemini_timeout_seconds: int = 180
+    # Set to a negative value to omit temperature and use the model default.
+    gemini_temperature: float = 0.2
+    # Optional cap on generated tokens; 0 means no cap.
+    gemini_max_output_tokens: int = 0
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_embed_model: str = "nomic-embed-text"
+    ollama_timeout_seconds: int = 180
 
-    @field_validator("llm_model", "image_model")
-    @classmethod
-    def strip_model(cls, value: str) -> str:
-        return value.strip()
+    # Embedding selection is independent from chat generation. The same
+    # provider/model is used for both indexing and query embeddings.
+    embedding_provider: str = "openai"
+    embedding_model: str = ""
 
+    chroma_path: str = "./storage/chroma"
+    chroma_collection: str = "ragassistant_chunks"
+    top_k: int = 5
+    # Dedicated worker pool for synchronous Chroma and embedding retrieval.
+    retrieval_workers: int = 64
+    chunk_size: int = 900
+    chunk_overlap: int = 150
+    max_upload_mb: int = 20
+    max_pages: int = 300
+    max_chunks: int = 2000
+    tunnel_url: str = "http://localhost:8000"
 
-@router.get("/config")
-def read_config():
-    settings = get_settings()
-    return {
-        "llm_provider": settings.llm_provider,
-        "llm_model": settings.llm_model,
-        "image_model": settings.image_model,
-        "embedding_provider": settings.embedding_provider,
-        "embedding_model": settings.embedding_model,
-        "resolved_embedding_model": settings.resolved_embedding_model,
-        "gemini_embed_dimensions": settings.gemini_embed_dimensions,
-    }
-
-
-@router.post("/config")
-def update_config(request: RuntimeConfigRequest):
-    values = request.model_dump()
-    if not values["llm_model"]:
-        raise HTTPException(422, "A chat model is required.")
-    current = get_settings()
-    current_values = {
-        "llm_provider": current.llm_provider,
-        "llm_model": current.llm_model,
-        "image_model": current.image_model,
-    }
-    if values == current_values:
-        return {
-            "status": "unchanged",
-            "llm_changed": False,
-            "embedding_changed": False,
-            "llm_provider": current.llm_provider,
-            "llm_model": current.llm_model,
-            "image_model": current.image_model,
-            "embedding_provider": current.embedding_provider,
-            "embedding_model": current.resolved_embedding_model,
-        }
-
-    llm_changed = (
-        values["llm_provider"] != current.llm_provider
-        or values["llm_model"] != current.llm_model
+    model_config = SettingsConfigDict(
+        env_file=ROOT / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
-    # Only settings that change the vector space invalidate existing document
-    # embeddings. Chat-generation settings must never trigger a document rebuild.
-    # Embedding settings are backend-owned (.env), never accepted from Moodle.
-    # Changing chat/image generation configuration cannot invalidate vectors.
-    embedding_changed = False
-    try:
-        RUNTIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        temporary = RUNTIME_CONFIG_PATH.with_suffix(".tmp")
-        temporary.write_text(json.dumps(values, indent=2), encoding="utf-8")
-        temporary.replace(RUNTIME_CONFIG_PATH)
-        get_settings.cache_clear()
-        if embedding_changed:
-            reset_vector_store_cache()
-        settings = get_settings()
-        return {
-            "status": "updated",
-            "llm_provider": settings.llm_provider,
-            "llm_model": settings.llm_model,
-            "image_model": settings.image_model,
-            "embedding_provider": settings.embedding_provider,
-            "embedding_model": settings.resolved_embedding_model,
-            "llm_changed": llm_changed,
-            "embedding_changed": embedding_changed,
-            "reindex_required": embedding_changed,
-            "note": (
-                "Embedding configuration changed. Moodle must reindex stored documents."
-                if embedding_changed
-                else "Chat-generation configuration changed. Existing document embeddings remain valid."
-                if llm_changed
-                else None
-            ),
+
+    @property
+    def chroma_absolute_path(self) -> str:
+        path = Path(self.chroma_path)
+        if not path.is_absolute():
+            path = ROOT / path
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+
+    @property
+    def resolved_embedding_model(self) -> str:
+        if self.embedding_model.strip():
+            return self.embedding_model.strip()
+        defaults = {
+            "openai": self.openai_embed_model,
+            "gemini": self.gemini_embed_model,
+            "ollama": self.ollama_embed_model,
         }
-    except OSError as exc:
-        raise HTTPException(500, f"Could not persist runtime configuration: {exc}") from exc
+        return defaults.get(self.embedding_provider.lower(), "")
+
+
+RUNTIME_CONFIG_PATH = ROOT / "storage" / "runtime_config.json"
+
+@lru_cache
+def get_settings() -> Settings:
+    settings = Settings()
+    if RUNTIME_CONFIG_PATH.is_file():
+        try:
+            import json
+            values = json.loads(RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
+            allowed = {
+                "llm_provider", "llm_model", "image_model",
+                "embedding_provider", "embedding_model",
+                "gemini_embed_dimensions",
+            }
+            overrides = {key: value for key, value in values.items() if key in allowed}
+            if overrides:
+                settings = settings.model_copy(update=overrides)
+        except (OSError, ValueError, TypeError):
+            # Invalid persisted configuration must not prevent the API starting.
+            pass
+    return settings
