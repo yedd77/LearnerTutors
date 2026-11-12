@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
 import os
@@ -17,9 +18,9 @@ class Settings(BaseSettings):
     rag_api_key: str = os.getenv("RAG_API_KEY", "replace-with-a-long-random-secret")
 
     # Text-generation selection is supplied by Moodle and persisted at runtime.
-    llm_provider: str = ""
-    llm_model: str = ""
-    image_model: str = ""
+    llm_provider: str = Field(default="", validation_alias="MOODLE_RUNTIME_LLM_PROVIDER")
+    llm_model: str = Field(default="", validation_alias="MOODLE_RUNTIME_LLM_MODEL")
+    image_model: str = Field(default="", validation_alias="MOODLE_RUNTIME_IMAGE_MODEL")
 
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
