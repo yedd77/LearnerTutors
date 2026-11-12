@@ -4,7 +4,8 @@ This project is a local FastAPI backend for a Moodle RAG (Retrieval-Augmented
 Generation) assistant. It uses:
 
 - **FastAPI** for the HTTP API.
-- **Ollama** for text embeddings and chat responses.
+- Configurable OpenAI, Gemini, or Ollama providers for generation.
+- A separately configured embedding provider/model for indexing and retrieval.
 - **ChromaDB** for persistent vector storage.
 - **Pydantic Settings** for configuration through environment variables.
 
@@ -79,13 +80,7 @@ Creates and configures the FastAPI application.
 ### `app/config.py`
 
 Defines the Pydantic Settings configuration used throughout the application.
-It reads values from `.env` and provides defaults for:
-
-- FastAPI host, port, environment, and log level.
-- The shared RAG API key.
-- Ollama URL, chat model, embedding model, and timeout.
-- ChromaDB path and collection name.
-- Retrieval, chunking, upload, page, and context limits.
+It reads infrastructure credentials and connection settings from `.env`. Moodle supplies the chat provider/model and optional image-generation model through `/api/v1/admin/config`; the backend does not select generation-model defaults. Embedding model defaults remain independently configured because indexing and query embeddings must use the same vector space.
 
 The `chroma_absolute_path` property converts a relative ChromaDB path to an
 absolute path and creates the directory when required.
@@ -102,7 +97,7 @@ Defines the chat endpoints under `/api/v1/chat`.
   2. Searches course-scoped document chunks in ChromaDB.
   3. Removes chunks whose `retrieval_enabled` flag is false.
   4. Builds source markers and source metadata.
-  5. Generates a grounded answer through Ollama.
+  5. Generates a grounded answer through the provider and model selected in Moodle.
   6. Returns the answer, sources, and retrieved chunk count.
 
 The endpoint accepts optional conversation history and an explicit `tool_id`.
@@ -160,8 +155,7 @@ Selects a tool from:
 3. Rule-based natural-language patterns.
 4. The default `ask` tool.
 
-Routing is local and rule-based; it does not make a second Ollama classifier
-request.
+Routing is local and rule-based; it does not make a second LLM classifier request.
 
 ### `app/prompt_builder.py`
 
