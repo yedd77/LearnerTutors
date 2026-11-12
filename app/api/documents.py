@@ -1,3 +1,5 @@
+import logging
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -18,6 +20,7 @@ from app.services.vector_store import (
 )
 
 router = APIRouter(prefix="/documents", tags=["documents"], dependencies=[RequireApiKey])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/index", response_model=IndexResponse, status_code=201)
@@ -33,7 +36,12 @@ def index_upload(
     if visibility not in {"personal", "course"}:
         raise HTTPException(400, "visibility must be 'personal' or 'course'.")
 
+    started = time.perf_counter()
     filename = Path(file.filename or "upload").name
+    logger.info(
+        "document.index.start document=%s course=%s filename=%s visibility=%s",
+        document_id, course_id, filename, visibility,
+    )
     if Path(filename).suffix.lower() not in {".pdf", ".docx", ".pptx", ".txt", ".md"}:
         raise HTTPException(415, "Unsupported file type.")
 
@@ -53,15 +61,23 @@ def index_upload(
     if not content:
         raise HTTPException(400, "Uploaded file is empty.")
 
+    parse_started = time.perf_counter()
     try:
         sections = extract_sections(filename, content)
         chunks = chunk_sections(sections)
+        logger.info(
+            "document.parse.finish document=%s sections=%s chunks=%s duration_ms=%.2f",
+            document_id, len(sections), len(chunks),
+            (time.perf_counter() - parse_started) * 1000,
+        )
     except DocumentParseError as exc:
         raise HTTPException(422, str(exc)) from exc
 
     if len(chunks) > s.max_chunks:
         raise HTTPException(413, f"File produces more than {s.max_chunks} chunks.")
 
+    index_started = time.perf_counter()
+    logger.info("document.vector_index.start document=%s chunks=%s", document_id, len(chunks))
     try:
         count = index_document(
             document_id,
@@ -77,10 +93,29 @@ def index_upload(
     except Exception as exc:
         raise HTTPException(502, f"Indexing failed: {exc}") from exc
 
+    logger.info(
+        "document.vector_index.finish document=%s indexed_chunks=%s duration_ms=%.2f",
+        document_id, count, (time.perf_counter() - index_started) * 1000,
+    )
+
     # Suggestions are generated only after successful indexing. OpenAI
     # failures are non-fatal and must not invalidate the indexed document.
-    suggestions = generate_document_suggestions(filename, sections)
+    suggestions_started = time.perf_counter()
+    try:
+        suggestions = generate_document_suggestions(filename, sections)
+        logger.info(
+            "document.suggestions.finish document=%s suggestions=%s duration_ms=%.2f",
+            document_id, len(suggestions),
+            (time.perf_counter() - suggestions_started) * 1000,
+        )
+    except Exception:
+        logger.exception("document.suggestions.error document=%s", document_id)
+        suggestions = []
 
+    logger.info(
+        "document.index.finish document=%s total_ms=%.2f",
+        document_id, (time.perf_counter() - started) * 1000,
+    )
     return IndexResponse(
         document_id=document_id,
         filename=filename,
