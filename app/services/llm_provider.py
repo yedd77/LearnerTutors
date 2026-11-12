@@ -26,13 +26,8 @@ def generate_answer(route: RouteResult, context: str, history: list[dict] | None
                     provider: str | None = None, model: str | None = None) -> str:
     settings = get_settings()
     selected_provider = (provider or settings.llm_provider).lower()
-    defaults = {
-        "openai": settings.openai_chat_model or settings.llm_model,
-        "gemini": settings.gemini_chat_model,
-        "ollama": settings.ollama_chat_model,
-    }
-    selected_model = model or settings.llm_model or defaults.get(selected_provider)
-    if selected_provider not in defaults:
+    selected_model = (model or settings.llm_model).strip()
+    if selected_provider not in {"openai", "gemini", "ollama"}:
         raise ProviderError(f"Unsupported chat provider: {selected_provider}")
     if not selected_model:
         raise ProviderError(f"No chat model configured for provider '{selected_provider}'.")
@@ -105,16 +100,11 @@ def generate_answer(route: RouteResult, context: str, history: list[dict] | None
 
 def generate_messages(messages: list[dict[str, str]], provider: str | None = None,
                       model: str | None = None, json_mode: bool = False) -> str:
-    """Generate text from a provider using the configured default when omitted."""
+    """Generate text using the provider and model selected in Moodle."""
     settings = get_settings()
     selected_provider = (provider or settings.llm_provider).lower()
-    defaults = {
-        "openai": settings.openai_chat_model or settings.llm_model,
-        "gemini": settings.gemini_chat_model,
-        "ollama": settings.ollama_chat_model,
-    }
-    selected_model = model or settings.llm_model or defaults.get(selected_provider)
-    if selected_provider not in defaults:
+    selected_model = (model or settings.llm_model).strip()
+    if selected_provider not in {"openai", "gemini", "ollama"}:
         raise ProviderError(f"Unsupported generation provider: {selected_provider}")
     if not selected_model:
         raise ProviderError(f"No model configured for provider '{selected_provider}'.")
@@ -190,13 +180,8 @@ async def generate_answer_async(route: RouteResult, context: str,
 
     settings = get_settings()
     selected_provider = (provider or settings.llm_provider).lower()
-    defaults = {
-        "openai": settings.openai_chat_model or settings.llm_model,
-        "gemini": settings.gemini_chat_model,
-        "ollama": settings.ollama_chat_model,
-    }
-    selected_model = model or settings.llm_model or defaults.get(selected_provider)
-    if selected_provider not in defaults:
+    selected_model = (model or settings.llm_model).strip()
+    if selected_provider not in {"openai", "gemini", "ollama"}:
         raise ProviderError(f"Unsupported chat provider: {selected_provider}")
     if not selected_model:
         raise ProviderError(f"No chat model configured for provider '{selected_provider}'.")
