@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Retrieval uses Chroma's synchronous client and synchronous embedding SDKs.
 # Keep this I/O-heavy work off the event loop and independent of Starlette's
-# smaller default worker pool. Tune with RAG_RETRIEVAL_WORKERS for the host.
+# smaller default worker pool. Tune with RETRIEVAL_WORKERS for the host.
 _settings = get_settings()
 _retrieval_executor = ThreadPoolExecutor(
     max_workers=max(1, _settings.retrieval_workers),
