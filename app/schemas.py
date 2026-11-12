@@ -13,9 +13,9 @@ class ChatRequest(BaseModel):
     include_course_documents: bool = True
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=12)
     tool_id: str | None = Field(default=None, max_length=80)
-    # Optional until the Moodle frontend starts sending these fields.
-    provider: Literal["openai", "gemini", "ollama"] | None = None
-    model: str | None = Field(default=None, max_length=160)
+    # Moodle must explicitly supply the administrator-selected generation model.
+    provider: Literal["openai", "gemini", "ollama"]
+    model: str = Field(min_length=1, max_length=160)
 
     @field_validator("question")
     @classmethod
@@ -27,8 +27,11 @@ class ChatRequest(BaseModel):
 
     @field_validator("model")
     @classmethod
-    def clean_model(cls, value: str | None) -> str | None:
-        return (value.strip() or None) if value is not None else None
+    def clean_model(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("A generation model must be selected in Moodle settings.")
+        return value
 
 
 class SourceItem(BaseModel):
