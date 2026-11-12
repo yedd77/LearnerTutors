@@ -71,6 +71,7 @@ def index_upload(
             (time.perf_counter() - parse_started) * 1000,
         )
     except DocumentParseError as exc:
+        logger.warning("document.parse.error document=%s filename=%s error=%s", document_id, filename, exc)
         raise HTTPException(422, str(exc)) from exc
 
     if len(chunks) > s.max_chunks:
@@ -89,8 +90,10 @@ def index_upload(
             retrieval_enabled=retrieval_enabled,
         )
     except DocumentCourseConflictError as exc:
+        logger.warning("document.index.conflict document=%s course=%s error=%s", document_id, course_id, exc)
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
+        logger.exception("document.vector_index.error document=%s course=%s", document_id, course_id)
         raise HTTPException(502, f"Indexing failed: {exc}") from exc
 
     logger.info(
