@@ -1,5 +1,10 @@
+import logging
+import time
+
 import requests
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingError(RuntimeError):
@@ -17,6 +22,11 @@ def embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> list
     if not model:
         raise EmbeddingError(f"No embedding model configured for provider '{provider}'.")
     vectors: list[list[float]] = []
+    total_started = time.perf_counter()
+    logger.info(
+        "embedding.start provider=%s model=%s items=%s task=%s",
+        provider, model, len(texts), task_type,
+    )
     try:
         if provider == "openai":
             if not settings.openai_api_key:
@@ -65,11 +75,17 @@ def embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> list
                 if len(batch_vectors) != len(batch):
                     raise EmbeddingError("Gemini returned an unexpected embedding count.")
                 vectors.extend(batch_vectors)
+        logger.info(
+            "embedding.finish provider=%s model=%s vectors=%s duration_ms=%.2f",
+            provider, model, len(vectors), (time.perf_counter() - total_started) * 1000,
+        )
         return vectors
     except EmbeddingError:
         raise
     except requests.HTTPError as exc:
+        logger.exception("embedding.http_error provider=%s model=%s", provider, model)
         body = exc.response.text[:1000] if exc.response is not None else str(exc)
         raise EmbeddingError(f"{provider} embeddings failed: {body}") from exc
     except Exception as exc:
+        logger.exception("embedding.error provider=%s model=%s", provider, model)
         raise EmbeddingError(f"{provider} embedding request failed: {type(exc).__name__}: {exc}") from exc
