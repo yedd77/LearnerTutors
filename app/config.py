@@ -16,21 +16,19 @@ class Settings(BaseSettings):
     port: int = 8000
     rag_api_key: str = os.getenv("RAG_API_KEY", "replace-with-a-long-random-secret")
 
-    # Default text-generation provider/model. Chat requests may override these.
-    llm_provider: str = "openai"
-    llm_model: str = "gpt-4o-luna"
+    # Text-generation selection is supplied by Moodle and persisted at runtime.
+    llm_provider: str = ""
+    llm_model: str = ""
+    image_model: str = ""
 
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
-    openai_chat_model: str = "gpt-4o-luna"
-    openai_image_model: str = "gpt-image-2.5-flare"
     openai_embed_model: str = "text-embedding-3-small"
     openai_timeout_seconds: int = 120
     openai_temperature: float = 0
     openai_max_completion_tokens: int = 0
 
     gemini_api_key: str = ""
-    gemini_chat_model: str = "gemini-3.6-flash"
     gemini_embed_model: str = "gemini-embedding-001"
     gemini_embed_dimensions: int = 768
     gemini_timeout_seconds: int = 180
@@ -39,7 +37,6 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
-    gemini_chat_model: str = "gemini-3.6-flash"
     gemini_temperature : float = 0.2
     gemini_embed_model: str = "gemini-embedding-001"
     gemini_embed_dimensions: int = 768  # 0 = use the model's default size
@@ -49,7 +46,6 @@ class Settings(BaseSettings):
     # Optional cap on generated tokens; 0 means no cap.
     gemini_max_output_tokens: int = 0
     ollama_base_url: str = "http://127.0.0.1:11434"
-    ollama_chat_model: str = "qwen2.5:7b-instruct"
     ollama_embed_model: str = "nomic-embed-text"
     ollama_timeout_seconds: int = 180
 
@@ -106,7 +102,7 @@ def get_settings() -> Settings:
             import json
             values = json.loads(RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
             allowed = {
-                "llm_provider", "llm_model",
+                "llm_provider", "llm_model", "image_model",
                 "embedding_provider", "embedding_model",
                 "gemini_embed_dimensions",
             }
