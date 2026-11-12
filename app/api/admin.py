@@ -13,13 +13,14 @@ router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[RequireApiKey]
 
 
 class RuntimeConfigRequest(BaseModel):
-    llm_provider: Literal["openai", "gemini", "ollama"] = "openai"
-    llm_model: str = Field(default="gpt-4o-luna", min_length=1, max_length=160)
+    llm_provider: Literal["openai", "gemini", "ollama"]
+    llm_model: str = Field(min_length=1, max_length=160)
+    image_model: str = Field(default="", max_length=160)
     embedding_provider: Literal["openai", "gemini", "ollama"] = "openai"
     embedding_model: str = Field(default="", max_length=160)
     gemini_embed_dimensions: int = Field(default=768, ge=0, le=3072)
 
-    @field_validator("llm_model", "embedding_model")
+    @field_validator("llm_model", "image_model", "embedding_model")
     @classmethod
     def strip_model(cls, value: str) -> str:
         return value.strip()
@@ -31,6 +32,7 @@ def read_config():
     return {
         "llm_provider": settings.llm_provider,
         "llm_model": settings.llm_model,
+        "image_model": settings.image_model,
         "embedding_provider": settings.embedding_provider,
         "embedding_model": settings.embedding_model,
         "resolved_embedding_model": settings.resolved_embedding_model,
@@ -47,6 +49,7 @@ def update_config(request: RuntimeConfigRequest):
     current_values = {
         "llm_provider": current.llm_provider,
         "llm_model": current.llm_model,
+        "image_model": current.image_model,
         "embedding_provider": current.embedding_provider,
         "embedding_model": current.embedding_model,
         "gemini_embed_dimensions": current.gemini_embed_dimensions,
@@ -58,6 +61,7 @@ def update_config(request: RuntimeConfigRequest):
             "embedding_changed": False,
             "llm_provider": current.llm_provider,
             "llm_model": current.llm_model,
+            "image_model": current.image_model,
             "embedding_provider": current.embedding_provider,
             "embedding_model": current.resolved_embedding_model,
         }
@@ -89,6 +93,7 @@ def update_config(request: RuntimeConfigRequest):
             "status": "updated",
             "llm_provider": settings.llm_provider,
             "llm_model": settings.llm_model,
+            "image_model": settings.image_model,
             "embedding_provider": settings.embedding_provider,
             "embedding_model": settings.resolved_embedding_model,
             "llm_changed": llm_changed,
