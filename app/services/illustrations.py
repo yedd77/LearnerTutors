@@ -28,6 +28,8 @@ def generate_illustration(question: str, answer: str, context: str) -> str:
     settings = get_settings()
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
+    if not settings.image_model:
+        raise RuntimeError("Image generation model is not configured in Moodle settings.")
 
     prompt = (
         "Create an accurate educational infographic for a university student. "
@@ -42,7 +44,7 @@ def generate_illustration(question: str, answer: str, context: str) -> str:
         f"{settings.openai_base_url.rstrip('/')}/images/generations",
         headers={"Authorization": f"Bearer {settings.openai_api_key}"},
         json={
-            "model": settings.openai_image_model,
+            "model": settings.image_model,
             "prompt": prompt,
             "size": "1024x1024",
             "quality": "medium",
@@ -92,6 +94,8 @@ async def generate_illustration_async(question: str, answer: str, context: str) 
     settings = get_settings()
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
+    if not settings.image_model:
+        raise RuntimeError("Image generation model is not configured in Moodle settings.")
 
     prompt = (
         "Create an accurate educational infographic for a university student. "
@@ -108,7 +112,7 @@ async def generate_illustration_async(question: str, answer: str, context: str) 
             f"{settings.openai_base_url.rstrip('/')}/images/generations",
             headers={"Authorization": f"Bearer {settings.openai_api_key}"},
             json={
-                "model": settings.openai_image_model,
+                "model": settings.image_model,
                 "prompt": prompt,
                 "size": "1024x1024",
                 "quality": "medium",
