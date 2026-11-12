@@ -125,8 +125,11 @@ def generate_answer(
     if os.getenv("LOG_PROMPTS", "false").strip().lower() in {"1", "true", "yes", "on"}:
         log_prompt(messages)
 
+    selected_model = (model or settings.llm_model).strip()
+    if not selected_model:
+        raise OpenAIError("No generation model configured in Moodle settings.")
     payload: dict[str, Any] = {
-        "model": model or settings.openai_chat_model or settings.llm_model,
+        "model": selected_model,
         "messages": messages,
     }
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
