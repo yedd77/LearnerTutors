@@ -30,7 +30,6 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
-    gemini_temperature : float = 0.2
     gemini_embed_model: str = "gemini-embedding-001"
     gemini_embed_dimensions: int = 768  # 0 = use the model's default size
     gemini_timeout_seconds: int = 180
