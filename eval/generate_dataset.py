@@ -34,9 +34,11 @@ CACHE_FOLDER = PROJECT_ROOT / "eval" / "cache"
 
 TESTSET_SIZE = 3
 
-# Model used only for dataset generation (overrides settings on purpose).
-OLLAMA_LLM_MODEL = "qwen2.5:7b-instruct"
-OLLAMA_MODEL = settings.ollama_embed_model
+# Supply the evaluation LLM explicitly; embeddings remain independently configured.
+OLLAMA_LLM_MODEL = os.getenv("RAGAS_LLM_MODEL", "").strip()
+if not OLLAMA_LLM_MODEL:
+    raise RuntimeError("Set RAGAS_LLM_MODEL to the evaluation generation model.")
+OLLAMA_MODEL = settings.resolved_embedding_model
 OLLAMA_URL = settings.ollama_base_url
 
 # Cache files
@@ -227,7 +229,7 @@ def make_headlines_safe(transform):
     transform.extract = safe_extract
 
 
-# Setup the local Ollama LLM and Nomic embeddings.
+# Setup the evaluation LLM and configured embedding model.
 print(f"\nInitializing Ollama LLM: {OLLAMA_LLM_MODEL}")
 
 qwen = ChatOllama(
@@ -244,7 +246,7 @@ generator_llm = LangchainLLMWrapper(
     run_config=RunConfig(timeout=600, max_retries=5, max_workers=2),
 )
 
-print("\nInitializing Nomic embeddings")
+print("\nInitializing configured embeddings")
 nomic = OllamaEmbeddings(
     model=OLLAMA_MODEL,
     base_url=OLLAMA_URL,
