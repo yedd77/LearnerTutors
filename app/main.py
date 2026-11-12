@@ -55,7 +55,8 @@ async def warm_vector_store():
             "startup.vector_store.failed duration_ms=%.2f",
             (time.perf_counter() - started) * 1000,
         )
-        raise
+        # Keep health/admin endpoints available for diagnosis. /ready reports
+        # not_ready and the first retrieval attempt will surface the same error.
 
 
 @app.middleware("http")
