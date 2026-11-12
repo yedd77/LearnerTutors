@@ -38,7 +38,7 @@ TESTSET_SIZE = 3
 OLLAMA_LLM_MODEL = os.getenv("RAGAS_LLM_MODEL", "").strip()
 if not OLLAMA_LLM_MODEL:
     raise RuntimeError("Set RAGAS_LLM_MODEL to the evaluation generation model.")
-OLLAMA_MODEL = settings.resolved_embedding_model
+OLLAMA_MODEL = settings.ollama_embed_model
 OLLAMA_URL = settings.ollama_base_url
 
 # Cache files
