@@ -31,7 +31,7 @@ def index_upload(
     owner_id: Annotated[int, Form(gt=0)],
     visibility: Annotated[str, Form()] = "personal",
     retrieval_enabled: Annotated[bool, Form()] = True,
-    generate_suggestions: Annotated[bool, Form()] = True,
+    generate_suggestions: Annotated[bool, Form()] = False,
 ):
     s = get_settings()
     if visibility not in {"personal", "course"}:
@@ -102,8 +102,8 @@ def index_upload(
         document_id, count, (time.perf_counter() - index_started) * 1000,
     )
 
-    # Suggestions are generated only after successful indexing. OpenAI
-    # failures are non-fatal and must not invalidate the indexed document.
+    # Suggestions run as a separate Moodle background task so slow LLM
+    # generation never holds up indexing completion or the document status.
     suggestions = []
     if generate_suggestions:
         suggestions_started = time.perf_counter()
