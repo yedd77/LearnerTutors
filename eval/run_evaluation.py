@@ -129,16 +129,15 @@ def make_evaluators(timeout: float):
     """
     Ollama exposes an OpenAI-compatible API at /v1.
 
-    Defaults can be overridden through .env:
-      RAGAS_BASE_URL=http://localhost:11434/v1
-      RAGAS_API_KEY=ollama
-      RAGAS_LLM_MODEL=qwen2.5:7b-instruct
-      RAGAS_EMBEDDING_MODEL=nomic-embed-text
+    Configure RAGAS_LLM_MODEL explicitly in .env. The embedding model may
+    reuse the backend embedding-model setting through RAGAS_EMBEDDING_MODEL.
     """
     base_url = os.getenv("RAGAS_BASE_URL", "http://localhost:11434/v1").rstrip("/")
     api_key = os.getenv("RAGAS_API_KEY", "ollama")
-    llm_model = os.getenv("RAGAS_LLM_MODEL", "qwen2.5:7b-instruct")
-    embedding_model = os.getenv("RAGAS_EMBEDDING_MODEL", "nomic-embed-text")
+    llm_model = os.getenv("RAGAS_LLM_MODEL", "").strip()
+    if not llm_model:
+        raise RuntimeError("Set RAGAS_LLM_MODEL to the evaluation generation model.")
+    embedding_model = os.getenv("RAGAS_EMBEDDING_MODEL", "nomic-embed-text").strip()
 
     async_client = AsyncOpenAI(
         base_url=base_url,
