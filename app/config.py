@@ -1,6 +1,6 @@
-from functools import lru_cache
 from pathlib import Path
 import json
+import threading
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
@@ -112,26 +112,47 @@ def decrypt_provider_secret(value: str) -> str:
         ) from exc
 
 
-@lru_cache
+_settings_lock = threading.Lock()
+_settings_cache: Settings | None = None
+_settings_cache_mtime: int | None = None
+
+
 def get_settings() -> Settings:
-    settings = Settings()
-    if RUNTIME_CONFIG_PATH.is_file():
-        try:
-            values = json.loads(RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
-            allowed = {"llm_provider", "llm_model", "image_model"}
-            overrides = {key: value for key, value in values.items() if key in allowed}
-            secrets = values.get("provider_api_keys", {})
-            if isinstance(secrets, dict):
-                # Moodle-managed credentials take precedence over environment values.
-                for provider, field in (("openai", "openai_api_key"), ("gemini", "gemini_api_key")):
-                    encrypted = secrets.get(provider)
-                    if encrypted:
-                        overrides[field] = decrypt_provider_secret(encrypted)
-            if overrides:
-                settings = settings.model_copy(update=overrides)
-        except (OSError, ValueError, TypeError, InvalidToken, RuntimeError):
-            # Do not silently hide a credential decryption error: it must be visible
-            # to operators, but must not prevent health/admin routes from loading.
-            import logging
-            logging.getLogger(__name__).exception("Could not load runtime configuration.")
-    return settings
+    """Load runtime settings and notice updates made by any FastAPI worker."""
+    global _settings_cache, _settings_cache_mtime
+    try:
+        current_mtime = RUNTIME_CONFIG_PATH.stat().st_mtime_ns
+    except OSError:
+        current_mtime = None
+
+    with _settings_lock:
+        if _settings_cache is not None and current_mtime == _settings_cache_mtime:
+            return _settings_cache
+
+        settings = Settings()
+        if RUNTIME_CONFIG_PATH.is_file():
+            try:
+                values = json.loads(RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
+                allowed = {"llm_provider", "llm_model", "image_model"}
+                overrides = {key: value for key, value in values.items() if key in allowed}
+                secrets = values.get("provider_api_keys", {})
+                if isinstance(secrets, dict):
+                    # Moodle-managed credentials take precedence over environment values.
+                    for provider, field in (
+                        ("openai", "openai_api_key"),
+                        ("gemini", "gemini_api_key"),
+                    ):
+                        encrypted = secrets.get(provider)
+                        if encrypted:
+                            overrides[field] = decrypt_provider_secret(encrypted)
+                if overrides:
+                    settings = settings.model_copy(update=overrides)
+            except (OSError, ValueError, TypeError, InvalidToken, RuntimeError):
+                # A bad encryption key should be visible to operators. Keep the
+                # service process alive so health and authentication diagnostics work.
+                import logging
+                logging.getLogger(__name__).exception("Could not load runtime configuration.")
+
+        _settings_cache = settings
+        _settings_cache_mtime = current_mtime
+        return settings
