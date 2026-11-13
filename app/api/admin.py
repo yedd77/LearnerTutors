@@ -102,12 +102,12 @@ def update_config(request: RuntimeConfigRequest):
             values["provider_api_keys"] = secrets
             temporary = RUNTIME_CONFIG_PATH.with_suffix(".tmp")
             temporary.write_text(json.dumps(values, indent=2), encoding="utf-8")
-            try:
-                os.chmod(temporary, 0o600)
-            except OSError:
-                # Encrypted values remain protected by Fernet even where POSIX
-                # permission bits are unavailable (for example, Windows).
-                pass
+            if os.name == "posix":
+                try:
+                    os.chmod(temporary, 0o600)
+                except OSError:
+                    # Fernet encryption remains the primary protection.
+                    pass
             temporary.replace(RUNTIME_CONFIG_PATH)
             settings = get_settings()
 
