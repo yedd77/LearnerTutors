@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     llm_provider: str = Field(default="", validation_alias="MOODLE_RUNTIME_LLM_PROVIDER")
     llm_model: str = Field(default="", validation_alias="MOODLE_RUNTIME_LLM_MODEL")
     image_model: str = Field(default="", validation_alias="MOODLE_RUNTIME_IMAGE_MODEL")
+    image_provider: str = Field(default="openai", validation_alias="MOODLE_RUNTIME_IMAGE_PROVIDER")
+    reuse_chat_api_key: bool = Field(default=False, validation_alias="MOODLE_RUNTIME_REUSE_CHAT_API_KEY")
+    image_openai_api_key: str = ""
+    image_gemini_api_key: str = ""
 
     # Environment credentials remain as fallback for existing deployments.
     openai_api_key: str = ""
@@ -133,16 +137,26 @@ def get_settings() -> Settings:
         if RUNTIME_CONFIG_PATH.is_file():
             try:
                 values = json.loads(RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
-                allowed = {"llm_provider", "llm_model", "image_model"}
+                allowed = {"llm_provider", "llm_model", "image_model", "image_provider", "reuse_chat_api_key"}
                 overrides = {key: value for key, value in values.items() if key in allowed}
                 secrets = values.get("provider_api_keys", {})
                 if isinstance(secrets, dict):
-                    # Moodle-managed credentials take precedence over environment values.
+                    # Moodle-managed chat credentials take precedence over environment values.
                     for provider, field in (
                         ("openai", "openai_api_key"),
                         ("gemini", "gemini_api_key"),
                     ):
                         encrypted = secrets.get(provider)
+                        if encrypted:
+                            overrides[field] = decrypt_provider_secret(encrypted)
+                image_secrets = values.get("image_provider_api_keys", {})
+                if isinstance(image_secrets, dict):
+                    # Image credentials are stored separately from chat credentials.
+                    for provider, field in (
+                        ("openai", "image_openai_api_key"),
+                        ("gemini", "image_gemini_api_key"),
+                    ):
+                        encrypted = image_secrets.get(provider)
                         if encrypted:
                             overrides[field] = decrypt_provider_secret(encrypted)
                 if overrides:
