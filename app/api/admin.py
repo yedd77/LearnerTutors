@@ -1,30 +1,49 @@
 import json
-from pathlib import Path
+import threading
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-from app.config import RUNTIME_CONFIG_PATH, get_settings
+from app.config import (
+    RUNTIME_CONFIG_PATH,
+    decrypt_provider_secret,
+    encrypt_provider_secret,
+    get_settings,
+)
 from app.security import RequireApiKey
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[RequireApiKey])
+_config_lock = threading.Lock()
 
 
 class RuntimeConfigRequest(BaseModel):
     llm_provider: Literal["openai", "gemini", "ollama"]
     llm_model: str = Field(min_length=1, max_length=160)
     image_model: str = Field(default="", max_length=160)
+    openai_api_key: str | None = Field(default=None, max_length=512)
+    gemini_api_key: str | None = Field(default=None, max_length=512)
+    clear_openai_api_key: bool = False
+    clear_gemini_api_key: bool = False
 
     @field_validator("llm_model", "image_model")
     @classmethod
     def strip_model(cls, value: str) -> str:
         return value.strip()
 
+    @field_validator("openai_api_key", "gemini_api_key")
+    @classmethod
+    def validate_provider_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if value and len(value) < 20:
+            raise ValueError("Provider API keys must contain at least 20 characters.")
+        return value or None
+
 
 @router.post("/connection-test")
 def test_connection():
-    """Return a minimal response only after the shared API key was validated."""
     return {"status": "ok", "authenticated": True}
 
 
@@ -35,55 +54,58 @@ def read_config():
         "llm_provider": settings.llm_provider,
         "llm_model": settings.llm_model,
         "image_model": settings.image_model,
-        # Expose embedding details for diagnostics only. Moodle cannot change them.
         "embedding_provider": settings.embedding_provider,
         "embedding_model": settings.embedding_model,
         "resolved_embedding_model": settings.resolved_embedding_model,
         "gemini_embed_dimensions": settings.gemini_embed_dimensions,
+        "openai_api_key_configured": bool(settings.openai_api_key),
+        "gemini_api_key_configured": bool(settings.gemini_api_key),
     }
 
 
 @router.post("/config")
 def update_config(request: RuntimeConfigRequest):
-    values = request.model_dump()
+    values = {
+        "llm_provider": request.llm_provider,
+        "llm_model": request.llm_model,
+        "image_model": request.image_model,
+    }
     if not values["llm_model"]:
         raise HTTPException(422, "A chat model is required.")
 
-    current = get_settings()
-    current_values = {
-        "llm_provider": current.llm_provider,
-        "llm_model": current.llm_model,
-        "image_model": current.image_model,
-    }
-    if values == current_values:
-        return {
-            "status": "unchanged",
-            "llm_changed": False,
-            "embedding_changed": False,
-            "llm_provider": current.llm_provider,
-            "llm_model": current.llm_model,
-            "image_model": current.image_model,
-            "embedding_provider": current.embedding_provider,
-            "embedding_model": current.resolved_embedding_model,
-        }
-
-    llm_changed = (
-        values["llm_provider"] != current.llm_provider
-        or values["llm_model"] != current.llm_model
-    )
-
-    # Embedding settings are backend-owned (.env), never accepted from Moodle.
-    # Changing chat or image generation configuration cannot invalidate vectors.
-    embedding_changed = False
-
     try:
-        RUNTIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        temporary = RUNTIME_CONFIG_PATH.with_suffix(".tmp")
-        temporary.write_text(json.dumps(values, indent=2), encoding="utf-8")
-        temporary.replace(RUNTIME_CONFIG_PATH)
-        get_settings.cache_clear()
+        with _config_lock:
+            RUNTIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            current_data = {}
+            if RUNTIME_CONFIG_PATH.is_file():
+                try:
+                    current_data = json.loads(RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
+                except (ValueError, OSError):
+                    current_data = {}
 
-        settings = get_settings()
+            secrets = current_data.get("provider_api_keys", {})
+            if not isinstance(secrets, dict):
+                secrets = {}
+
+            # Empty/omitted fields preserve existing credentials. Explicit clear
+            # flags are required to remove a Moodle-managed provider key.
+            if request.clear_openai_api_key:
+                secrets.pop("openai", None)
+            elif request.openai_api_key:
+                secrets["openai"] = encrypt_provider_secret(request.openai_api_key)
+
+            if request.clear_gemini_api_key:
+                secrets.pop("gemini", None)
+            elif request.gemini_api_key:
+                secrets["gemini"] = encrypt_provider_secret(request.gemini_api_key)
+
+            values["provider_api_keys"] = secrets
+            temporary = RUNTIME_CONFIG_PATH.with_suffix(".tmp")
+            temporary.write_text(json.dumps(values, indent=2), encoding="utf-8")
+            temporary.replace(RUNTIME_CONFIG_PATH)
+            get_settings.cache_clear()
+            settings = get_settings()
+
         return {
             "status": "updated",
             "llm_provider": settings.llm_provider,
@@ -91,14 +113,14 @@ def update_config(request: RuntimeConfigRequest):
             "image_model": settings.image_model,
             "embedding_provider": settings.embedding_provider,
             "embedding_model": settings.resolved_embedding_model,
-            "llm_changed": llm_changed,
-            "embedding_changed": embedding_changed,
+            "llm_changed": True,
+            "embedding_changed": False,
             "reindex_required": False,
-            "note": (
-                "Chat-generation configuration changed. Existing document embeddings remain valid."
-                if llm_changed
-                else None
-            ),
+            "openai_api_key_configured": bool(settings.openai_api_key),
+            "gemini_api_key_configured": bool(settings.gemini_api_key),
+            "note": "Provider credentials and model settings are applied immediately; no FastAPI restart or document reindex is required.",
         }
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
     except OSError as exc:
-        raise HTTPException(500, f"Could not persist runtime configuration: {exc}") from exc
+        raise HTTPException(500, "Could not persist runtime configuration.") from exc
