@@ -22,6 +22,12 @@ class RuntimeConfigRequest(BaseModel):
         return value.strip()
 
 
+@router.post("/connection-test")
+def test_connection():
+    """Return a minimal response only after the shared API key was validated."""
+    return {"status": "ok", "authenticated": True}
+
+
 @router.get("/config")
 def read_config():
     settings = get_settings()
