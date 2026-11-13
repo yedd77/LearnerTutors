@@ -19,10 +19,10 @@ class RuntimeConfigRequest(BaseModel):
     image_provider: Literal["openai", "gemini"] = "openai"
     image_model: str = Field(default="", max_length=160)
     reuse_chat_api_key: bool = False
-    openai_api_key: str | None = Field(default=None, max_length=512)
-    gemini_api_key: str | None = Field(default=None, max_length=512)
-    openai_image_api_key: str | None = Field(default=None, max_length=512)
-    gemini_image_api_key: str | None = Field(default=None, max_length=512)
+    openai_api_key: str | None = None
+    gemini_api_key: str | None = None
+    openai_image_api_key: str | None = None
+    gemini_image_api_key: str | None = None
     clear_openai_api_key: bool = False
     clear_gemini_api_key: bool = False
     clear_openai_image_api_key: bool = False
@@ -41,10 +41,7 @@ class RuntimeConfigRequest(BaseModel):
     def validate_provider_key(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        value = value.strip()
-        if value and len(value) < 20:
-            raise ValueError("Provider API keys must contain at least 20 characters.")
-        return value or None
+        return value.strip() or None
 
 
 @router.post("/connection-test")
@@ -83,6 +80,15 @@ def update_config(request: RuntimeConfigRequest):
     }
     if not values["llm_model"]:
         raise HTTPException(422, "A chat model is required.")
+    # Validate credentials without placing their values in Pydantic error responses.
+    for credential in (
+        request.openai_api_key,
+        request.gemini_api_key,
+        request.openai_image_api_key,
+        request.gemini_image_api_key,
+    ):
+        if credential is not None and not 20 <= len(credential) <= 512:
+            raise HTTPException(422, "Provider API keys must contain between 20 and 512 characters.")
     if request.reuse_chat_api_key and request.llm_provider != request.image_provider:
         raise HTTPException(
             422,
