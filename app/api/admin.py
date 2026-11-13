@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.config import (
     RUNTIME_CONFIG_PATH,
-    decrypt_provider_secret,
     encrypt_provider_secret,
     get_settings,
 )
@@ -103,7 +102,6 @@ def update_config(request: RuntimeConfigRequest):
             temporary = RUNTIME_CONFIG_PATH.with_suffix(".tmp")
             temporary.write_text(json.dumps(values, indent=2), encoding="utf-8")
             temporary.replace(RUNTIME_CONFIG_PATH)
-            get_settings.cache_clear()
             settings = get_settings()
 
         return {
