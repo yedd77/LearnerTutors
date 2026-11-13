@@ -3,7 +3,6 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 ROOT = Path(__file__).resolve().parent.parent
@@ -15,7 +14,9 @@ class Settings(BaseSettings):
     log_prompts: bool = False
     host: str = "127.0.0.1"
     port: int = 8000
-    rag_api_key: str = os.getenv("RAG_API_KEY", "replace-with-a-long-random-secret")
+    # Shared Moodle-to-FastAPI secret. Source it only from the backend environment/.env.
+    # Moodle stores a matching copy for its server-to-server Authorization header.
+    rag_api_key: str = Field(default="", validation_alias="RAG_API_KEY")
 
     # Text-generation selection is supplied by Moodle and persisted at runtime.
     llm_provider: str = Field(default="", validation_alias="MOODLE_RUNTIME_LLM_PROVIDER")

@@ -18,7 +18,7 @@ IMAGE_TTL = 60 * 60 * 24 * 365
 
 def _signature(image_id: str, expires: int) -> str:
     secret = get_settings().rag_api_key
-    if not secret or secret == "replace-with-a-long-random-secret":
+    if not secret:
         raise RuntimeError("RAG_API_KEY is not configured.")
     message = f"{image_id}:{expires}".encode()
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
