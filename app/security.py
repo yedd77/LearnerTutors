@@ -1,3 +1,4 @@
+"""Shared-secret authentication between the Moodle plugin and this backend."""
 import secrets
 from typing import Annotated
 
@@ -10,6 +11,13 @@ from app.config import get_settings
 def verify_api_key(
     x_rag_api_key: Annotated[str | None, Header(alias="X-RAG-API-Key")] = None,
 ) -> None:
+    """Allow the request only if ``X-RAG-API-Key`` equals ``RAG_API_KEY``.
+
+    Returns 503 if the server key is missing or shorter than 32 characters (so a
+    weak key is never accepted) and 401 for a missing or wrong header. The
+    comparison is constant-time. This authenticates the Moodle server, not the
+    end user: Moodle is responsible for user permissions.
+    """
     expected = get_settings().rag_api_key
 
     # Require a sufficiently long random shared secret rather than accepting

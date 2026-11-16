@@ -27,18 +27,22 @@ CONVERSATIONAL_FALLBACK = (
 
 
 class Intent(BaseModel):
+    """Classifier output schema."""
     intent: Literal["conversational", "course_question"]
 
 
 class SearchQuery(BaseModel):
+    """Query-rewrite output schema."""
     query: str = Field(min_length=1, max_length=500)
 
 
 def max_attempts(settings: Settings) -> int:
+    """RAG_MAX_RETRIEVAL_ATTEMPTS clamped to 1..MAX_ATTEMPTS_CAP."""
     return min(MAX_ATTEMPTS_CAP, max(1, settings.rag_max_retrieval_attempts))
 
 
 def _aux_messages(prompt_file: str, **values: str) -> list[dict[str, str]]:
+    """Build the messages for a classify/rewrite call from a prompt file in prompts/graph."""
     prompt = _fill(_read_prompt(str(GRAPH_PROMPTS / prompt_file)), **values)
     return [
         {"role": "system", "content": "You are a precise routing component. Return only valid JSON."},
@@ -78,6 +82,12 @@ def heuristic_intent(message: str) -> str | None:
 
 
 async def classify(state: RagState, runtime: Runtime[RagContext]) -> dict:
+    """Decide between a conversational reply and the course-question path.
+
+    Explicit tools and slash commands always take the course path, then the
+    regex heuristic decides clear cases, and only ambiguous messages use the
+    LLM classifier. Any classifier failure falls back to the course path.
+    """
     route = state["route"]
     if route.explicit_command or route.tool.id != "ask":
         return {"intent": "course_question", "classified_by": "router"}
@@ -99,11 +109,13 @@ async def classify(state: RagState, runtime: Runtime[RagContext]) -> dict:
 
 
 def after_classify(state: RagState) -> str:
+    """Edge: conversational_reply or rewrite_query."""
     return "conversational_reply" if state["intent"] == "conversational" else "rewrite_query"
 
 
 # --------------------------------------------------------------------------- conversational
 async def conversational_reply(state: RagState, runtime: Runtime[RagContext]) -> dict:
+    """Short friendly reply with no retrieval; a static reply is used if the LLM fails."""
     ctx = runtime.context
     messages = [{"role": "system", "content": _read_prompt(str(GRAPH_PROMPTS / "conversational.md"))}]
     messages += [
@@ -123,6 +135,12 @@ async def conversational_reply(state: RagState, runtime: Runtime[RagContext]) ->
 
 # --------------------------------------------------------------------------- course path
 async def rewrite_query(state: RagState, runtime: Runtime[RagContext]) -> dict:
+    """Choose the search text for this attempt.
+
+    The first turn uses the question as-is; follow-ups are condensed with the
+    history and retries are reworded by the LLM. Exact-text extraction is never
+    rewritten. The result is used only for search, never for generation.
+    """
     question = state["question"]
     attempts = state.get("attempts", 0)
     history = state.get("history", [])
@@ -154,10 +172,12 @@ async def rewrite_query(state: RagState, runtime: Runtime[RagContext]) -> dict:
 
 
 def after_rewrite(state: RagState) -> str:
+    """Edge: retrieve, or no_context when a retry would repeat the same query."""
     return state["next_step"]
 
 
 async def retrieve(state: RagState, runtime: Runtime[RagContext]) -> dict:
+    """Search the course with the current query; the scope comes only from runtime.context."""
     ctx = runtime.context
     settings = get_settings()
     top_k = state["route"].tool.top_k or settings.top_k
@@ -186,6 +206,11 @@ def grade_matches(matches: list[dict], settings: Settings, request_id: str) -> l
 
 
 async def grade(state: RagState, runtime: Runtime[RagContext]) -> dict:
+    """Keep relevant chunks and choose the next step: generate, retry, or no_context.
+
+    A retry only happens when chunks existed but none were close enough, the
+    attempt budget allows it, and the tool is not exact-text extraction.
+    """
     ctx = runtime.context
     settings = get_settings()
     matches = state.get("matches", [])
@@ -208,10 +233,12 @@ async def grade(state: RagState, runtime: Runtime[RagContext]) -> dict:
 
 
 def after_grade(state: RagState) -> str:
+    """Edge: the next_step chosen by grade."""
     return state["next_step"]
 
 
 async def generate(state: RagState, runtime: Runtime[RagContext]) -> dict:
+    """Build the [S1..Sn] context and sources, then generate the grounded answer."""
     ctx = runtime.context
     started = time.perf_counter()
     context, sources = retrieval.build_context_and_sources(state["matches"])
@@ -240,10 +267,12 @@ async def validate(state: RagState, runtime: Runtime[RagContext]) -> dict:
 
 
 async def no_context(state: RagState, runtime: Runtime[RagContext]) -> dict:
+    """Return the standard no-relevant-text answer; the model is never asked to guess."""
     chat_logger.info("chat.no_context id=%s attempts=%s", runtime.context.request_id, state.get("attempts", 0))
     return {"answer": retrieval.NO_CONTEXT_ANSWER, "matches": [], "sources": [], "context": "",
             "outcome": "no_context"}
 
 
 async def finalize(state: RagState, runtime: Runtime[RagContext]) -> dict:
+    """Terminal node; the response is built from the final state by the chat endpoint."""
     return {}

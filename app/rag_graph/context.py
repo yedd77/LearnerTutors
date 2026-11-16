@@ -1,3 +1,4 @@
+"""Immutable per-request access scope passed to the graph as runtime context."""
 from dataclasses import dataclass
 
 

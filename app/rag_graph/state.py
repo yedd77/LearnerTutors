@@ -1,3 +1,4 @@
+"""Typed state shared between the graph nodes."""
 import operator
 from typing import Annotated, Any, Literal, TypedDict
 

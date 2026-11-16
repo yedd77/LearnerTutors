@@ -25,8 +25,10 @@ RECURSION_LIMIT = 25
 
 
 def _timed(name: str, node):
+    """Wrap a node to log its duration and append its name to ``state["trace"]``."""
     @functools.wraps(node)
     async def wrapper(state: RagState, runtime: Runtime[RagContext]) -> dict:
+        """Run the wrapped node, then record timing and trace."""
         started = time.perf_counter()
         update = dict(await node(state, runtime))
         logger.info("rag_graph.node.finish id=%s node=%s duration_ms=%.2f",
@@ -37,6 +39,7 @@ def _timed(name: str, node):
 
 
 def build_graph():
+    """Wire the nodes and conditional edges shown in the module docstring and compile the graph."""
     graph = StateGraph(RagState, context_schema=RagContext)
     for name in ("classify", "conversational_reply", "rewrite_query", "retrieve", "grade",
                  "generate", "validate", "no_context", "finalize"):

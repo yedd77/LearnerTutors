@@ -1,3 +1,4 @@
+"""/explain illustrations: generate an image, store it, serve it via a signed URL."""
 import asyncio
 import base64
 import hashlib
@@ -19,6 +20,7 @@ IMAGE_TTL = 60 * 60 * 24 * 365
 
 
 def _signature(image_id: str, expires: int) -> str:
+    """HMAC-SHA256 of ``image_id:expires``, keyed with RAG_API_KEY."""
     secret = get_settings().rag_api_key
     if not secret:
         raise RuntimeError("RAG_API_KEY is not configured.")
@@ -27,6 +29,7 @@ def _signature(image_id: str, expires: int) -> str:
 
 
 def _build_prompt(question: str, answer: str, context: str) -> str:
+    """Image prompt: infographic instructions plus truncated question, answer and course text."""
     return (
         "Create an accurate educational infographic for a university student. "
         "Use a clear visual hierarchy, diagrams, arrows, stages and concise labels. "
@@ -39,6 +42,7 @@ def _build_prompt(question: str, answer: str, context: str) -> str:
 
 
 def _selected_image_key(settings: Any) -> str:
+    """Return the API key for the image provider: the image key, or the chat key if reuse is on."""
     provider = (settings.image_provider or "openai").lower()
     if provider not in {"openai", "gemini"}:
         raise RuntimeError(f"Unsupported image generation provider: {provider}")
@@ -66,6 +70,7 @@ def _selected_image_key(settings: Any) -> str:
 
 
 def _generate_openai_image(prompt: str, settings: Any, api_key: str) -> bytes:
+    """Generate a 1024x1024 PNG with the OpenAI images API and return its bytes."""
     if not settings.image_model:
         raise RuntimeError("Image generation model is not configured in Moodle settings.")
     response = requests.post(
@@ -94,6 +99,7 @@ def _generate_openai_image(prompt: str, settings: Any, api_key: str) -> bytes:
 
 
 def _generate_gemini_image(prompt: str, settings: Any, api_key: str) -> bytes:
+    """Generate an image with a Gemini image-capable model and return the first image's bytes."""
     if not settings.image_model:
         raise RuntimeError("Image generation model is not configured in Moodle settings.")
     try:
@@ -125,6 +131,7 @@ def _generate_gemini_image(prompt: str, settings: Any, api_key: str) -> bytes:
 
 
 def _generate_image_bytes(question: str, answer: str, context: str) -> bytes:
+    """Generate the illustration with the image provider and model selected in Moodle."""
     settings = get_settings()
     provider = (settings.image_provider or "openai").lower()
     api_key = _selected_image_key(settings)
@@ -138,6 +145,7 @@ def _generate_image_bytes(question: str, answer: str, context: str) -> bytes:
 
 
 def _store_image(image_bytes: bytes) -> str:
+    """Save the PNG under a random ID and return a signed URL valid for IMAGE_TTL seconds."""
     if not image_bytes:
         raise RuntimeError("Image provider returned an empty image.")
     IMAGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -149,10 +157,12 @@ def _store_image(image_bytes: bytes) -> str:
 
 
 def generate_illustration(question: str, answer: str, context: str) -> str:
+    """Generate and store an illustration synchronously; return its signed URL."""
     return _store_image(_generate_image_bytes(question, answer, context))
 
 
 def serve_illustration(image_id: str, expires: int, signature: str) -> FileResponse:
+    """Return the stored PNG if the signed URL is valid (404 unknown ID, 403 bad or expired link)."""
     if len(image_id) != 32 or any(c not in "0123456789abcdef" for c in image_id):
         raise HTTPException(404, "Illustration not found.")
     now = int(time.time())

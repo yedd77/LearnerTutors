@@ -29,7 +29,7 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 
 class ProviderError(RuntimeError):
-    pass
+    """A chat provider call failed or was misconfigured. The chat API maps it to 502."""
 
 
 class _Labels(NamedTuple):
@@ -49,6 +49,7 @@ _STRUCTURED = _Labels("Unsupported generation provider", "No model configured",
 
 
 def _history_text(history: list[dict[str, Any]]) -> str:
+    """Format the last 6 user/assistant turns as ``ROLE: text`` lines (2000 chars each)."""
     return "\n".join(
         f"{item.get('role', 'user').upper()}: {str(item.get('content', ''))[:2000]}"
         for item in history[-6:]
@@ -74,6 +75,7 @@ def _resolve(provider: str | None, model: str | None,
 
 
 def _finish(answer: Any, provider: str, labels: _Labels) -> str:
+    """Return the stripped answer, or raise ProviderError if it is empty or not text."""
     if not isinstance(answer, str) or not answer.strip():
         raise ProviderError(f"{provider} {labels.empty}")
     return answer.strip()
@@ -156,6 +158,7 @@ def _to_lc_messages(messages: list[dict[str, str]], provider: str) -> list:
 
 
 def _message_text(message: Any) -> Any:
+    """Extract plain text from a LangChain message across langchain-core versions."""
     text = getattr(message, "text", None)
     if isinstance(text, str):  # langchain-core 1.x: a property (a callable str subclass)
         return str(text)
@@ -196,6 +199,7 @@ def _http_details(exc: BaseException) -> tuple[int | None, str]:
 
 
 def _langchain_error(exc: Exception, provider: str, labels: _Labels) -> ProviderError:
+    """Wrap any provider/SDK exception as ProviderError, with the HTTP status when known."""
     status, body = _http_details(exc)
     if status is not None:
         return ProviderError(f"{provider} returned HTTP {status}: {body}")
@@ -267,6 +271,10 @@ _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 
 async def _structured_once(provider: str, model: str, messages: list[dict[str, str]],
                            schema: type[SchemaT]) -> SchemaT:
+    """One structured-output attempt: native structured output, then a JSON-mode fallback.
+
+    The fallback is skipped for 401/403/404/429 errors, where retrying cannot help.
+    """
     lc_messages = _to_lc_messages(messages, provider)
     try:
         llm = _chat_model(provider, model).with_structured_output(schema)
@@ -339,6 +347,7 @@ _bridge_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _bridge() -> asyncio.AbstractEventLoop:
+    """Return the long-lived event loop (on a daemon thread) used by generate_structured_sync."""
     global _bridge_loop
     with _bridge_lock:
         if _bridge_loop is None or _bridge_loop.is_closed():

@@ -1,12 +1,20 @@
+"""Pydantic request and response models for the public API."""
 from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 class ChatHistoryMessage(BaseModel):
+    """One earlier turn of the conversation, as sent by Moodle."""
     role: Literal["user", "assistant"]
     content: str = Field(min_length=1, max_length=4000)
 
 
 class ChatRequest(BaseModel):
+    """Body of ``POST /api/v1/chat``.
+
+    ``course_id``/``user_id`` come from Moodle, which has already checked the
+    user's access. ``tool_id`` selects a prompt tool explicitly; otherwise the
+    question text is routed (see prompt_router).
+    """
     question: str = Field(min_length=2, max_length=4000)
     course_id: int = Field(gt=0)
     user_id: int = Field(gt=0)
@@ -20,6 +28,7 @@ class ChatRequest(BaseModel):
     @field_validator("question")
     @classmethod
     def nonblank(cls, value: str) -> str:
+        """Trim the question and reject whitespace-only input."""
         value = value.strip()
         if not value:
             raise ValueError("Question cannot be blank.")
@@ -28,6 +37,7 @@ class ChatRequest(BaseModel):
     @field_validator("model")
     @classmethod
     def clean_model(cls, value: str) -> str:
+        """Trim the model name and reject whitespace-only input."""
         value = value.strip()
         if not value:
             raise ValueError("A generation model must be selected in Moodle settings.")
@@ -35,6 +45,7 @@ class ChatRequest(BaseModel):
 
 
 class SourceItem(BaseModel):
+    """A cited document page. ``markers`` lists the [S1..Sn] labels used in the answer."""
     document_id: str
     filename: str
     page: int | None = None
@@ -44,6 +55,7 @@ class SourceItem(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    """Chat answer with its sources; ``retrieved_contexts`` are the chunk texts used."""
     answer: str
     sources: list[SourceItem]
     retrieved_chunks: int = 0
@@ -52,6 +64,7 @@ class ChatResponse(BaseModel):
 
 
 class IndexResponse(BaseModel):
+    """Result of indexing a document, including any generated starter suggestions."""
     document_id: str
     filename: str
     course_id: int
@@ -61,6 +74,7 @@ class IndexResponse(BaseModel):
 
 
 class DeleteResponse(BaseModel):
+    """Result of deleting a document's vectors."""
     document_id: str
     deleted_chunks: int
     status: str

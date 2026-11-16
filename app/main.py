@@ -1,3 +1,4 @@
+"""FastAPI application: routers, lifespan, request logging, /health and /ready."""
 import asyncio
 import logging
 import time
@@ -51,6 +52,7 @@ async def warm_vector_store():
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    """Warm up Chroma before serving traffic; stop the retrieval thread pool on shutdown."""
     await warm_vector_store()
     yield
     from app.services.retrieval import shutdown_retrieval_executor
@@ -118,11 +120,13 @@ async def log_requests(request, call_next):
 
 @app.get("/health")
 def health():
+    """Liveness check: the process is up. No authentication, no dependencies."""
     return {"status": "ok", "service": s.app_name, "environment": s.app_env}
 
 
 @app.get("/ready")
 def ready():
+    """Readiness check: Chroma opens and reports its chunk count, otherwise 503."""
     try:
         from app.services.vector_store import get_collection
 

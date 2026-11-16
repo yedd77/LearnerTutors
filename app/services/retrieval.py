@@ -24,6 +24,7 @@ _executor_lock = threading.Lock()
 
 
 def get_retrieval_executor() -> ThreadPoolExecutor:
+    """Return the shared retrieval thread pool, creating it on first use."""
     global _executor
     with _executor_lock:
         if _executor is None:
@@ -49,6 +50,7 @@ _warned_uncalibrated: set[tuple[str, str]] = set()
 
 
 def enabled_only(matches: list[dict]) -> list[dict]:
+    """Keep matches whose document is enabled for retrieval (missing flag means enabled)."""
     return [match for match in matches if match["metadata"].get("retrieval_enabled", True)]
 
 

@@ -1,3 +1,4 @@
+"""Assemble chat messages from the core prompts, the tool prompt and the request."""
 from functools import lru_cache
 from pathlib import Path
 import re
@@ -14,11 +15,13 @@ def _read_cached(path: str, mtime: float) -> str:
 
 # wrapper to read a prompt file and cache it, using the file's mtime to invalidate the cache
 def _read_prompt(path: str) -> str:
+    """Return a prompt file's text, re-reading it only after the file is modified."""
     prompt_path = Path(path)
     return _read_cached(path, prompt_path.stat().st_mtime)
 
 # load shared prompt files from core directory
 def _core_prompt() -> str:
+    """Join the shared system instructions: role, grounding rules and answer format."""
     parts = []
     for filename in ("instructions.md", "grounding.md", "answer_format.md"):
         path = CORE_DIR / filename
@@ -30,6 +33,11 @@ def _core_prompt() -> str:
 
 # Fill placeholders in a prompt template with provided values, leaving unknown placeholders unchanged
 def _fill(template: str, **values: str) -> str:
+    """Replace ``{name}`` placeholders with ``values``; unknown placeholders are kept.
+
+    Known bug ERR-001: a value that itself contains ``{question}`` or
+    ``{history}`` is substituted again (pinned by an xfail test).
+    """
     # Replace known placeholders only; do not use format(), which would interpret
     # braces that may appear in code examples or retrieved documents.
     for key, value in values.items():

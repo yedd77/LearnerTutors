@@ -1,8 +1,15 @@
+"""Split extracted document text into overlapping chunks for embedding."""
 import re
 from app.config import get_settings
 
 # function to chunk text into smaller piece based on the chunk size and overlap
 def chunk_sections(sections: list[dict]) -> list[dict]:
+    """Return ``[{"page", "text"}]`` chunks of about CHUNK_SIZE characters per section.
+
+    Whitespace runs are collapsed first. Consecutive chunks overlap by
+    CHUNK_OVERLAP characters (capped at half the size; size is at least 200),
+    and every chunk keeps its section's page number for citations.
+    """
     s = get_settings()
     size = max(200, s.chunk_size)
     overlap = max(0, min(s.chunk_overlap, size // 2))

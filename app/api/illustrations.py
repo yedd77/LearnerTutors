@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Query
+"""Public image endpoint for /explain illustrations (authorised by the signed URL, not the API key)."""
+from fastapi import APIRouter, Query
 from fastapi.responses import FileResponse
 
 from app.services.illustrations import serve_illustration

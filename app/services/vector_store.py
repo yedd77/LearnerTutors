@@ -1,3 +1,9 @@
+"""ChromaDB storage: one collection per embedding model, course-scoped search.
+
+Every chunk stores ``document_id``, ``filename``, ``course_id``, ``owner_id``,
+``visibility`` ("course"), ``retrieval_enabled`` and ``page``. Search always
+filters on course, retrieval flag and visibility.
+"""
 import hashlib
 import logging
 import re
@@ -117,6 +123,7 @@ def _migrate_retrieval_metadata(collection):
 
 # Generate a unique ID for a chunk based on its document ID, index, and text.
 def _chunk_id(document_id: str, index: int, text: str) -> str:
+    """Deterministic chunk ID: ``<document_id>_<index>_<hash of id, index and text>``."""
     digest = hashlib.sha256(
         f"{document_id}:{index}:{text}".encode()
     ).hexdigest()[:20]
@@ -136,6 +143,13 @@ def index_document(
     chunks: list[dict],
     retrieval_enabled: Optional[bool] = None,
 ) -> int:
+    """Embed and store a document's chunks, replacing any previous version; return the count.
+
+    Raises DocumentCourseConflictError if ``document_id`` already belongs to a
+    different course. ``retrieval_enabled=None`` keeps the previous flag (or
+    True for a new document). If embedding or storage fails part-way, the
+    partially written chunks are removed before the error is re-raised.
+    """
     collection = get_collection()
     document_filter = {"document_id": str(document_id)}
     existing = collection.get(
@@ -338,7 +352,11 @@ def search_course(
     include_course_documents: bool,
     top_k: int,
 ) -> list[dict]:
-    """Search only enabled chunks the user is allowed to access."""
+    """Search only enabled chunks the user is allowed to access.
+
+    Returns up to ``top_k`` (max 20) rows ``{"chunk_id", "text", "metadata",
+    "distance"}``, nearest first; ``distance`` is cosine distance (lower is closer).
+    """
     # Course documents are the only retrievable kind. When the caller excludes
     # them there is nothing the user may search, so do not query at all.
     if not include_course_documents:
@@ -371,6 +389,10 @@ def search_course(
         n_results=max(1, min(top_k, 20)),
         where=where,
         include=["documents", "metadatas", "distances"],
+    )
+    logger.info(
+        "Retrieval query finished course=%s results=%s duration_ms=%.2f",
+        course_id, len(result["ids"][0]), (time.perf_counter() - query_started) * 1000,
     )
 
     rows = []
