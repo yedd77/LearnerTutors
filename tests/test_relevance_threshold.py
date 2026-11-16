@@ -3,7 +3,7 @@ import logging
 
 import pytest
 
-import app.api.chat as chat_module
+import app.services.retrieval as retrieval_module
 from app.config import CALIBRATED_MAX_DISTANCE, Settings
 from helpers import chat_body, index_text
 
@@ -94,7 +94,7 @@ def test_uncalibrated_model_warns_once(client, auth, configure, stub_generation,
     monkeypatch.delenv("RETRIEVAL_MAX_DISTANCE")
     monkeypatch.setattr("app.config.Settings.model_config", {**Settings.model_config, "env_file": None})
     configure()
-    monkeypatch.setattr(chat_module, "_warned_uncalibrated", set())
+    monkeypatch.setattr(retrieval_module, "_warned_uncalibrated", set())
     index_text("bio", CHUNK)
     with caplog.at_level(logging.WARNING, logger="app.api.chat"):
         ask(client, auth, "Who won the football world cup in 2018?")

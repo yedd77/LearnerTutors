@@ -1,57 +1,21 @@
 import asyncio
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, HTTPException, Request
 
 from app.config import get_settings
-from app.schemas import ChatRequest, ChatResponse, SourceItem
+from app.schemas import ChatRequest, ChatResponse
 from app.security import RequireApiKey
-from app.services.llm_provider import ProviderError, generate_answer_async
+from app.services.llm_provider import ProviderError
 from app.services.illustrations import generate_illustration_async
-from app.services.vector_store import search_course
 from app.prompt_registry import get_tool_menu
 from app.prompt_router import route_message
+from app.rag_graph.context import RagContext
+from app.rag_graph.graph import run_rag_graph
 
 router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[RequireApiKey])
 logger = logging.getLogger(__name__)
-
-# Retrieval uses Chroma's synchronous client and synchronous embedding SDKs.
-# Keep this I/O-heavy work off the event loop and independent of Starlette's
-# smaller default worker pool. Tune with RETRIEVAL_WORKERS for the host.
-_settings = get_settings()
-_retrieval_executor = ThreadPoolExecutor(
-    max_workers=max(1, _settings.retrieval_workers),
-    thread_name_prefix="rag-retrieval",
-)
-
-
-_warned_uncalibrated: set[tuple[str, str]] = set()
-
-
-def _filter_by_relevance(matches: list[dict], settings, request_id: str) -> list[dict]:
-    """Drop chunks too far from the question (cosine distance above the threshold)."""
-    if not matches:
-        return matches
-    threshold = settings.resolved_retrieval_max_distance
-    if threshold <= 0:
-        embedding = (settings.embedding_provider.lower(), settings.resolved_embedding_model)
-        if settings.retrieval_max_distance is None and embedding not in _warned_uncalibrated:
-            _warned_uncalibrated.add(embedding)
-            logger.warning(
-                "chat.retrieval.threshold_disabled embedding=%s/%s reason=uncalibrated_model "
-                "(set RETRIEVAL_MAX_DISTANCE to enable)", *embedding,
-            )
-        return matches
-    kept = [m for m in matches if m.get("distance") is None or m["distance"] <= threshold]
-    distances = [m["distance"] for m in matches if m.get("distance") is not None]
-    logger.info(
-        "chat.retrieval.filtered id=%s dropped=%s kept=%s threshold=%.3f best_distance=%s",
-        request_id, len(matches) - len(kept), len(kept), threshold,
-        f"{min(distances):.3f}" if distances else "n/a",
-    )
-    return kept
 
 
 @router.get("/tools")
@@ -95,110 +59,32 @@ async def ask(request: ChatRequest, http_request: Request):
                 detail="Enter a request after selecting the command, e.g. /exam Create 10 questions.",
             )
 
-        retrieval_started = time.perf_counter()
-        logger.info(
-            "chat.retrieval.start id=%s course=%s top_k=%s",
-            request_id,
-            request.course_id,
-            route.tool.top_k or settings.top_k,
+        history = [item.model_dump() for item in request.history]
+        # Access scope comes from the request only and is passed as runtime
+        # context; the graph can change the search text, never the scope.
+        result = await run_rag_graph(
+            route=route,
+            history=history,
+            context=RagContext(
+                course_id=request.course_id,
+                user_id=request.user_id,
+                include_course_documents=request.include_course_documents,
+                request_id=request_id,
+                provider=request.provider or settings.llm_provider,
+                model=request.model or settings.llm_model,
+            ),
         )
-        loop = asyncio.get_running_loop()
-        matches = await loop.run_in_executor(
-            _retrieval_executor,
-            search_course,
-            question,
-            request.course_id,
-            request.include_course_documents,
-            route.tool.top_k or settings.top_k,
-        )
-        logger.info(
-            "chat.retrieval.finish id=%s chunks=%s duration_ms=%.2f",
-            request_id,
-            len(matches),
-            (time.perf_counter() - retrieval_started) * 1000,
-        )
-        matches = [
-            match for match in matches
-            if match["metadata"].get("retrieval_enabled", True)
-        ]
-        matches = _filter_by_relevance(matches, settings, request_id)
-        if not matches:
+        answer = result["answer"]
+        matches = result.get("matches", [])
+        context = result.get("context", "")
+        if result.get("outcome") != "answered":
             logger.info(
-                "chat.no_context id=%s total_ms=%.2f",
+                "chat.finish id=%s outcome=%s total_ms=%.2f",
                 request_id,
+                result.get("outcome"),
                 (time.perf_counter() - request_started) * 1000,
             )
-            return ChatResponse(
-                answer=(
-                    "I couldn't find relevant text in the documents available to you "
-                    "for this course. Upload or index course materials first, or try a "
-                    "more specific question."
-                ),
-                sources=[],
-                retrieved_chunks=0,
-                retrieved_contexts=[],
-            )
-
-        context_started = time.perf_counter()
-        passages, sources, source_indexes = [], [], {}
-        for i, match in enumerate(matches, 1):
-            metadata = match["metadata"]
-            page = metadata.get("page", -1)
-            page = page if isinstance(page, int) and page > 0 else None
-            document_id = str(metadata.get("document_id", ""))
-            passages.append(
-                f"[S{i}] File: {metadata.get('filename', 'Unknown')}; "
-                f"page/slide: {page or 'not available'}\n{match['text']}"
-            )
-            key = (document_id, page)
-            source_index = source_indexes.get(key)
-            if source_index is None:
-                sources.append(
-                    SourceItem(
-                        document_id=document_id,
-                        filename=str(metadata.get("filename", "Unknown")),
-                        page=page,
-                        chunk_id=match["chunk_id"],
-                        excerpt=match["text"][:350],
-                        markers=[f"S{i}"],
-                    )
-                )
-                source_indexes[key] = len(sources) - 1
-            else:
-                sources[source_index].markers.append(f"S{i}")
-
-        history = [item.model_dump() for item in request.history]
-        context = "\n\n".join(passages)
-        logger.info(
-            "chat.context.ready id=%s chunks=%s sources=%s context_chars=%s history_messages=%s duration_ms=%.2f",
-            request_id,
-            len(matches),
-            len(sources),
-            len(context),
-            len(history),
-            (time.perf_counter() - context_started) * 1000,
-        )
-
-        generation_started = time.perf_counter()
-        logger.info(
-            "chat.llm.start id=%s provider=%s model=%s",
-            request_id,
-            request.provider or settings.llm_provider,
-            request.model or settings.llm_model,
-        )
-        answer = await generate_answer_async(
-            route=route,
-            context=context,
-            history=history,
-            provider=request.provider,
-            model=request.model,
-        )
-        logger.info(
-            "chat.llm.finish id=%s answer_chars=%s duration_ms=%.2f",
-            request_id,
-            len(answer),
-            (time.perf_counter() - generation_started) * 1000,
-        )
+            return ChatResponse(answer=answer, sources=[], retrieved_chunks=0, retrieved_contexts=[])
 
         illustration_url = None
         if route.tool.id == "concept_explanation" and route.explicit_command:
@@ -227,7 +113,7 @@ async def ask(request: ChatRequest, http_request: Request):
         )
         return ChatResponse(
             answer=answer,
-            sources=sources,
+            sources=result["sources"],
             retrieved_chunks=len(matches),
             retrieved_contexts=[match["text"] for match in matches],
             illustration_url=illustration_url,

@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     # questions get the no-context reply. Unset = use the calibrated default for the
     # active embedding model (see CALIBRATED_MAX_DISTANCE); 0 = disabled.
     retrieval_max_distance: float | None = None
+    # RAG graph limits. Total retrieval attempts per question (first search plus
+    # rewritten retries), hard-capped at 3; and the timeout for the auxiliary
+    # classify/rewrite LLM calls, after which the graph falls back to defaults.
+    rag_max_retrieval_attempts: int = 2
+    rag_aux_timeout_seconds: float = 20
     retrieval_workers: int = 64
     chunk_size: int = 900
     chunk_overlap: int = 150

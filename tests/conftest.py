@@ -193,7 +193,7 @@ def auth() -> dict[str, str]:
 @pytest.fixture
 def stub_generation(monkeypatch):
     """Replace chat generation. Records every call; set `.error` to simulate failure."""
-    import app.api.chat as chat_module
+    import app.services.llm_provider as llm_provider
 
     class Stub:
         def __init__(self):
@@ -212,7 +212,7 @@ def stub_generation(monkeypatch):
             raise stub.error
         return stub.answer
 
-    monkeypatch.setattr(chat_module, "generate_answer_async", fake_generate_answer_async)
+    monkeypatch.setattr(llm_provider, "generate_answer_async", fake_generate_answer_async)
     return stub
 
 

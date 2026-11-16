@@ -219,6 +219,22 @@ def generate_messages(messages: list[dict[str, str]], provider: str | None = Non
         raise _langchain_error(exc, selected_provider, _GENERATION) from exc
 
 
+async def generate_messages_async(messages: list[dict[str, str]], provider: str | None = None,
+                                  model: str | None = None) -> str:
+    """Async counterpart of ``generate_messages`` for prebuilt message lists."""
+    _, selected_provider, selected_model = _resolve(provider, model, _GENERATION)
+    try:
+        llm = _chat_model(selected_provider, selected_model)
+        result = await llm.ainvoke(_to_lc_messages(messages, selected_provider))
+        return _finish(_message_text(result), selected_provider, _GENERATION)
+    except asyncio.CancelledError:
+        raise
+    except ProviderError:
+        raise
+    except Exception as exc:
+        raise _langchain_error(exc, selected_provider, _GENERATION) from exc
+
+
 async def generate_answer_async(route: RouteResult, context: str,
                                 history: list[dict] | None = None,
                                 provider: str | None = None,
