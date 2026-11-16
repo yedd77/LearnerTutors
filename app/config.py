@@ -1,7 +1,21 @@
+"""Application settings.
+
+Two sources are combined:
+
+* ``.env`` / environment variables (``Settings``): secrets, provider URLs and
+  timeouts, the embedding model, storage paths and limits.
+* ``storage/runtime_config.json``: the chat/image provider, model and
+  Fernet-encrypted API keys that Moodle pushes via ``POST /admin/config``.
+  ``get_settings()`` re-reads it whenever the file changes, so every worker
+  process picks up a new model or key on its next request.
+"""
 from pathlib import Path
 import json
+import logging
 import os
 import threading
+from typing import Any
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
@@ -9,6 +23,8 @@ from cryptography.fernet import Fernet, InvalidToken
 
 load_dotenv()
 ROOT = Path(__file__).resolve().parent.parent
+RUNTIME_CONFIG_PATH = ROOT / "storage" / "runtime_config.json"
+logger = logging.getLogger(__name__)
 
 # Relevance cut-offs measured per embedding model (provider, model). Distances are not
 # comparable across embedding models, so unlisted models get no default threshold.
@@ -20,6 +36,7 @@ CALIBRATED_MAX_DISTANCE: dict[tuple[str, str], float] = {
 
 
 class Settings(BaseSettings):
+    """Configuration read from environment variables and ``.env`` (names are case-insensitive)."""
     app_name: str = "RAG Assistant API"
     app_env: str = "development"
     log_level: str = "INFO"
@@ -43,10 +60,12 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_embed_model: str = "text-embedding-3-small"
     openai_timeout_seconds: int = 120
+    # Not sent to OpenAI: reasoning models reject explicit temperatures (see llm_provider).
     openai_temperature: float = 0
     openai_max_completion_tokens: int = 0
 
     gemini_api_key: str = ""
+    # Not used: the Gemini SDK and LangChain integration use Google's default endpoint.
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     gemini_embed_model: str = "gemini-embedding-001"
     gemini_embed_dimensions: int = 768
@@ -92,6 +111,7 @@ class Settings(BaseSettings):
 
     @property
     def chroma_absolute_path(self) -> str:
+        """Chroma directory as an absolute path (relative to the repo root), created if missing."""
         path = Path(self.chroma_path)
         if not path.is_absolute():
             path = ROOT / path
@@ -108,6 +128,7 @@ class Settings(BaseSettings):
 
     @property
     def resolved_embedding_model(self) -> str:
+        """``EMBEDDING_MODEL`` if set, otherwise the provider's default embedding model."""
         if self.embedding_model.strip():
             return self.embedding_model.strip()
         defaults = {
@@ -133,11 +154,9 @@ def apply_tracing_policy(settings: "Settings | None" = None) -> None:
             os.environ[name] = "false"
 
 
-RUNTIME_CONFIG_PATH = ROOT / "storage" / "runtime_config.json"
-
-
 def _runtime_fernet() -> Fernet:
-    key = __import__("os").getenv("RUNTIME_CONFIG_ENCRYPTION_KEY", "").strip()
+    """Build the Fernet cipher from RUNTIME_CONFIG_ENCRYPTION_KEY, or raise RuntimeError."""
+    key = os.getenv("RUNTIME_CONFIG_ENCRYPTION_KEY", "").strip()
     if not key:
         raise RuntimeError(
             "RUNTIME_CONFIG_ENCRYPTION_KEY is required to store provider credentials securely. "
@@ -150,10 +169,12 @@ def _runtime_fernet() -> Fernet:
 
 
 def encrypt_provider_secret(value: str) -> str:
+    """Encrypt a provider API key for storage in the runtime config file."""
     return _runtime_fernet().encrypt(value.encode("utf-8")).decode("ascii")
 
 
 def decrypt_provider_secret(value: str) -> str:
+    """Decrypt a stored provider API key; RuntimeError if the encryption key is wrong."""
     try:
         return _runtime_fernet().decrypt(value.encode("ascii")).decode("utf-8")
     except (InvalidToken, ValueError, UnicodeEncodeError) as exc:
@@ -162,13 +183,42 @@ def decrypt_provider_secret(value: str) -> str:
         ) from exc
 
 
+# Runtime-config fields Moodle may override, and where its encrypted keys go.
+_RUNTIME_FIELDS = {"llm_provider", "llm_model", "image_model", "image_provider", "reuse_chat_api_key"}
+_RUNTIME_KEY_FIELDS = (
+    # Moodle-managed chat credentials take precedence over environment values.
+    ("provider_api_keys", "openai", "openai_api_key"),
+    ("provider_api_keys", "gemini", "gemini_api_key"),
+    # Image credentials are stored separately from chat credentials.
+    ("image_provider_api_keys", "openai", "image_openai_api_key"),
+    ("image_provider_api_keys", "gemini", "image_gemini_api_key"),
+)
+
+
+def _runtime_overrides(values: Any) -> dict[str, Any]:
+    """Turn the parsed runtime config into Settings overrides, decrypting stored keys."""
+    if not isinstance(values, dict):
+        raise ValueError("Runtime configuration must be a JSON object.")
+    overrides = {key: value for key, value in values.items() if key in _RUNTIME_FIELDS}
+    for section, provider, field in _RUNTIME_KEY_FIELDS:
+        stored = values.get(section, {})
+        encrypted = stored.get(provider) if isinstance(stored, dict) else None
+        if encrypted:
+            overrides[field] = decrypt_provider_secret(encrypted)
+    return overrides
+
+
 _settings_lock = threading.Lock()
 _settings_cache: Settings | None = None
 _settings_cache_mtime: int | None = None
 
 
 def get_settings() -> Settings:
-    """Load runtime settings and notice updates made by any FastAPI worker."""
+    """Load runtime settings and notice updates made by any FastAPI worker.
+
+    Cached until the runtime config file's mtime changes. If the file cannot be
+    read or decrypted, the error is logged and ``.env`` values are used alone.
+    """
     global _settings_cache, _settings_cache_mtime
     try:
         current_mtime = RUNTIME_CONFIG_PATH.stat().st_mtime_ns
@@ -183,35 +233,13 @@ def get_settings() -> Settings:
         if RUNTIME_CONFIG_PATH.is_file():
             try:
                 values = json.loads(RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
-                allowed = {"llm_provider", "llm_model", "image_model", "image_provider", "reuse_chat_api_key"}
-                overrides = {key: value for key, value in values.items() if key in allowed}
-                secrets = values.get("provider_api_keys", {})
-                if isinstance(secrets, dict):
-                    # Moodle-managed chat credentials take precedence over environment values.
-                    for provider, field in (
-                        ("openai", "openai_api_key"),
-                        ("gemini", "gemini_api_key"),
-                    ):
-                        encrypted = secrets.get(provider)
-                        if encrypted:
-                            overrides[field] = decrypt_provider_secret(encrypted)
-                image_secrets = values.get("image_provider_api_keys", {})
-                if isinstance(image_secrets, dict):
-                    # Image credentials are stored separately from chat credentials.
-                    for provider, field in (
-                        ("openai", "image_openai_api_key"),
-                        ("gemini", "image_gemini_api_key"),
-                    ):
-                        encrypted = image_secrets.get(provider)
-                        if encrypted:
-                            overrides[field] = decrypt_provider_secret(encrypted)
+                overrides = _runtime_overrides(values)
                 if overrides:
                     settings = settings.model_copy(update=overrides)
             except (OSError, ValueError, TypeError, InvalidToken, RuntimeError):
                 # A bad encryption key should be visible to operators. Keep the
                 # service process alive so health and authentication diagnostics work.
-                import logging
-                logging.getLogger(__name__).exception("Could not load runtime configuration.")
+                logger.exception("Could not load runtime configuration.")
 
         _settings_cache = settings
         _settings_cache_mtime = current_mtime

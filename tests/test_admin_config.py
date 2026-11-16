@@ -188,3 +188,14 @@ def test_only_allowed_runtime_fields_are_applied(runtime_path):
     assert settings.llm_model == "ok-model"
     assert settings.rag_api_key.startswith("test-api-key-")
     assert "evil" not in settings.chroma_path
+
+
+@pytest.mark.parametrize("content", ["[1, 2, 3]", "\"just a string\"", "null"])
+def test_non_object_runtime_file_does_not_crash_settings(client, auth, runtime_path, content):
+    runtime_path.write_text(content, encoding="utf-8")
+    reset_settings_cache()
+    settings = config_module.get_settings()  # logged, falls back to .env values
+    assert settings.llm_model == ""
+    # Moodle can still repair the file through the admin endpoint.
+    assert post(client, auth).status_code == 200
+    assert config_module.get_settings().llm_model == "chat-model-x"
