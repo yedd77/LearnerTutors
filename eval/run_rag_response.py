@@ -53,6 +53,12 @@ def parse_args():
                    help="Chat path, e.g. /chat")
     p.add_argument("--course-id", type=int, default=os.getenv("RAG_COURSE_ID"))
     p.add_argument("--user-id", type=int, default=os.getenv("RAG_USER_ID"))
+    # /chat requires the generation provider and model. Default to the selection
+    # Moodle last synchronised to the backend runtime config.
+    p.add_argument("--provider", choices=["openai", "gemini", "ollama"], default=s.llm_provider or None,
+                   help="Generation provider (default: the one selected in Moodle)")
+    p.add_argument("--model", default=s.llm_model or None,
+                   help="Generation model (default: the one selected in Moodle)")
     p.add_argument("--timeout", type=float, default=300.0, help="Per-request timeout, seconds")
     p.add_argument("--delay", type=float, default=1.0, help="Pause between questions, seconds")
     p.add_argument("--limit", type=int, default=None, help="Only use the first N dataset rows (smoke test)")
@@ -69,6 +75,8 @@ def parse_args():
         missing.append("--course-id / RAG_COURSE_ID")
     if args.user_id is None:
         missing.append("--user-id / RAG_USER_ID")
+    if not args.provider or not args.model:
+        missing.append("--provider and --model (or select a chat model in Moodle first)")
     if missing:
         p.error("missing required values: " + "; ".join(missing))
     args.course_id = int(args.course_id)
@@ -267,6 +275,8 @@ def main():
             "include_course_documents": True,
             "history": [],
             "tool_id": None,
+            "provider": args.provider,
+            "model": args.model,
         }
         print(f"[{n}/{len(pending)}] {row_id}  {q['user_input'][:80]!r}")
         res = ask(session, url, headers, payload, args)

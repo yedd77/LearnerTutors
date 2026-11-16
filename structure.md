@@ -1,360 +1,257 @@
-# RAG Assistant Backend Structure
+# LearnerTutors Backend Structure
 
-This project is a local FastAPI backend for a Moodle RAG (Retrieval-Augmented
-Generation) assistant. It uses:
+FastAPI backend for a Moodle RAG (Retrieval-Augmented Generation) assistant. It uses:
 
-- **FastAPI** for the HTTP API.
-- Configurable OpenAI, Gemini, or Ollama providers for generation.
-- A separately configured embedding provider/model for indexing and retrieval.
-- **ChromaDB** for persistent vector storage.
-- **Pydantic Settings** for configuration through environment variables.
+- **FastAPI** for the HTTP API, authenticated with a shared key from the Moodle plugin.
+- **OpenAI, Gemini or Ollama** for chat generation through LangChain chat models. Moodle chooses the provider and model on every request.
+- **LangGraph** to orchestrate each chat request: classify, rewrite, retrieve, grade, then generate.
+- A separately configured **embedding provider/model** for indexing and retrieval (direct HTTP/SDK calls).
+- **ChromaDB** for persistent vector storage, with one collection per embedding model.
+- **Pydantic Settings** for `.env` configuration, plus an encrypted runtime config that Moodle writes.
+
+Setup, run, test and evaluation commands are in [README.md](README.md).
 
 ## Project tree
 
 ```text
-ragassistant-backend/
+LearnerTutors/
 |
 |-- app/
-|   |-- __init__.py
-|   |-- config.py
-|   |-- main.py
-|   |-- prompt_builder.py
-|   |-- prompt_registry.py
-|   |-- prompt_router.py
-|   |-- schemas.py
-|   |-- security.py
+|   |-- config.py               Settings, runtime config loading, tracing policy, calibrated thresholds
+|   |-- main.py                 FastAPI app, lifespan (Chroma warm-up / pool shutdown), /health, /ready
+|   |-- prompt_builder.py       Builds chat messages from core + tool prompts
+|   |-- prompt_registry.py      Prompt tool definitions (slash commands, top_k)
+|   |-- prompt_router.py        Picks a tool from tool_id, slash command or patterns
+|   |-- schemas.py              Pydantic request/response models
+|   |-- security.py             X-RAG-API-Key authentication dependency
 |   |
 |   |-- api/
-|   |   |-- __init__.py
-|   |   |-- chat.py
-|   |   `-- documents.py
+|   |   |-- admin.py            /admin: connection test, runtime provider/model/key config
+|   |   |-- chat.py             /chat: tool menu and the chat endpoint (runs the RAG graph)
+|   |   |-- documents.py        /documents: index, suggestions, delete, retrieval toggle
+|   |   `-- illustrations.py    /illustrations: signed-URL image download
+|   |
+|   |-- rag_graph/
+|   |   |-- context.py          RagContext: immutable per-request access scope + model
+|   |   |-- state.py            RagState: graph state (no access-scope fields)
+|   |   |-- nodes.py            classify, conversational_reply, rewrite_query, retrieve,
+|   |   |                       grade, generate, validate, no_context, finalize
+|   |   `-- graph.py            StateGraph wiring and run_rag_graph()
 |   |
 |   |-- prompts/
-|   |   |-- core/
-|   |   |   |-- answer_format.md
-|   |   |   |-- grounding.md
-|   |   |   `-- instructions.md
-|   |   |
-|   |   `-- tools/
-|   |       |-- ask.md
-|   |       |-- concept_explanation.md
-|   |       |-- exact_text_extraction.md
-|   |       |-- exam_generation.md
-|   |       |-- flashcards.md
-|   |       |-- note_making.md
-|   |       |-- practice_quiz.md
-|   |       |-- study_guide.md
-|   |       `-- summarization.md
+|   |   |-- core/               instructions.md, grounding.md, answer_format.md
+|   |   |-- tools/              ask, concept_explanation, exact_text_extraction, exam_generation,
+|   |   |                       flashcards, note_making, practice_quiz, study_guide, summarization
+|   |   `-- graph/              classify.md, rewrite.md, conversational.md
 |   |
 |   `-- services/
-|       |-- __init__.py
-|       |-- chunker.py
-|       |-- document_parser.py
-|       |-- ollama_client.py
-|       `-- vector_store.py
+|       |-- chunker.py          Overlapping character-window chunking
+|       |-- document_parser.py  PDF/DOCX/PPTX/TXT/MD text extraction
+|       |-- embedding_provider.py  Embeddings via OpenAI, Gemini or Ollama
+|       |-- illustrations.py    /explain image generation (OpenAI or Gemini) and signed URLs
+|       |-- llm_provider.py     The only chat-generation abstraction (LangChain models)
+|       |-- retrieval.py        Retrieval thread pool, relevance filter, context/source building
+|       |-- suggestion_generator.py  Starter-question suggestions for documents
+|       `-- vector_store.py     ChromaDB collection, indexing, course-scoped search
 |
-|-- storage/
-|   `-- chroma/
-|       `-- ...                 Persistent ChromaDB files
+|-- docs/PROVIDER_CREDENTIALS.md  How Moodle stores and syncs provider keys
+|-- eval/                       RAGAS pipeline (generate_dataset, run_rag_response, run_evaluation)
+|-- tests/                      Offline pytest suite (see README)
+|-- conductor/                  Track specs, plans and the architecture decision log
+|-- storage/                    Runtime data, git-ignored
+|   |-- chroma/                 ChromaDB files
+|   |-- illustrations/          Generated /explain images
+|   `-- runtime_config.json     Moodle-synced provider/model + Fernet-encrypted keys
 |
-|-- .env.example                Example environment configuration
-|-- README.md                   Setup, run, and API usage instructions
-|-- requirements.txt            Python dependencies
-`-- structure.md                This project structure reference
+|-- requirements.txt            Runtime dependencies
+|-- requirements-dev.txt        + pytest
+|-- requirements-eval.txt       + RAGAS evaluation tooling
+|-- pytest.ini
+|-- README.md
+`-- structure.md                This file
 ```
 
 ## Application entry point
 
 ### `app/main.py`
 
-Creates and configures the FastAPI application.
-
-- Configures application logging.
-- Registers the document and chat routers under `/api/v1`.
-- Provides `GET /health` for a basic health check.
-- Provides `GET /ready` to verify that ChromaDB can be opened and report the
-  number of indexed chunks.
-- Adds request and response timing logs without logging request headers or
-  bodies.
+- Applies the LangSmith tracing policy (forced off unless `LANGSMITH_TRACING=true`) before LangChain is imported.
+- Configures logging and registers the admin, documents, chat and illustrations routers under `/api/v1`.
+- **Lifespan:** on startup, opens Chroma and runs its one-time metadata migration. A failure here is not fatal, so `/health` keeps working and `/ready` reports 503. On shutdown, it stops the retrieval thread pool.
+- `GET /health` is a liveness check. `GET /ready` opens Chroma and reports the indexed chunk count.
+- Middleware gives each request an `X-Request-ID` and logs timings, without logging headers or bodies.
 
 ### `app/config.py`
 
-Defines the Pydantic Settings configuration used throughout the application.
-It reads infrastructure credentials and connection settings from `.env`. Moodle supplies the chat provider/model and optional image-generation model through `/api/v1/admin/config`; the backend does not select generation-model defaults. Embedding model defaults remain independently configured because indexing and query embeddings must use the same vector space.
-
-The `chroma_absolute_path` property converts a relative ChromaDB path to an
-absolute path and creates the directory when required.
+- `Settings` reads infrastructure settings from `.env`: secrets, provider URLs and timeouts, embedding config, Chroma, limits and the RAG graph limits.
+- `get_settings()` overlays `storage/runtime_config.json`, the chat/image provider and model plus encrypted keys that Moodle writes. It reloads when the file's modification time changes, which keeps every worker process in sync without a restart.
+- `CALIBRATED_MAX_DISTANCE` holds the measured relevance cut-off for each embedding model. `resolved_retrieval_max_distance` applies it unless `RETRIEVAL_MAX_DISTANCE` overrides it.
 
 ## API layer
 
+All routers except `/illustrations` require the `X-RAG-API-Key` header.
+
 ### `app/api/chat.py`
 
-Defines the chat endpoints under `/api/v1/chat`.
-
-- `GET /api/v1/chat/tools` returns the available prompt tools for a UI menu.
+- `GET /api/v1/chat/tools`: the tool menu for the UI.
 - `POST /api/v1/chat`:
-  1. Routes the request to a prompt tool.
-  2. Searches course-scoped document chunks in ChromaDB.
-  3. Removes chunks whose `retrieval_enabled` flag is false.
-  4. Builds source markers and source metadata.
-  5. Generates a grounded answer through the provider and model selected in Moodle.
-  6. Returns the answer, sources, and retrieved chunk count.
-
-The endpoint accepts optional conversation history and an explicit `tool_id`.
+  - routes the message to a prompt tool;
+  - rejects an empty question after the slash command is removed (422);
+  - builds a `RagContext` from the request and runs the RAG graph;
+  - for an explicit `/explain`, generates an illustration;
+  - returns `ChatResponse`.
+  - Provider failures return 502.
 
 ### `app/api/documents.py`
 
-Defines document-management endpoints under `/api/v1/documents`.
+- `POST /documents/index` uploads, extracts, chunks, embeds and stores a document. Only course documents are accepted; `visibility` must be `course` (see DECISION-003). It can also generate starter suggestions.
+- `POST /documents/suggestions` and `POST /documents/{id}/suggestions/{slot}` regenerate suggestions without re-indexing.
+- `DELETE /documents/{id}?course_id=` removes a document's vectors.
+- `PATCH /documents/{id}/retrieval` enables or disables retrieval for all of a document's chunks.
 
-- `POST /api/v1/documents/index` uploads and indexes PDF, DOCX, PPTX, TXT, or
-  Markdown content.
-- `DELETE /api/v1/documents/{document_id}` removes a document's vectors.
-- `PATCH /api/v1/documents/{document_id}/retrieval` enables or disables
-  retrieval for all chunks belonging to a document.
+### `app/api/admin.py`
 
-Uploads are validated for file type, size, document metadata, page limits, and
-maximum generated chunks. All endpoints require the configured API key.
+- `POST /admin/connection-test` confirms that Moodle can authenticate.
+- `GET /admin/config` reports the current provider and model, and whether keys are configured. It returns booleans only, never the keys.
+- `POST /admin/config` is how Moodle pushes the chat/image provider, model and keys. The keys are Fernet-encrypted into `storage/runtime_config.json`. Embedding settings are read-only here.
 
-## Request and security modules
+### `app/api/illustrations.py`
 
-### `app/schemas.py`
+- `GET /illustrations/{image_id}?expires=&signature=` serves a generated image. Authorisation comes from the HMAC-signed, expiring URL.
 
-Contains the Pydantic request and response models used by the API, including
-chat requests, chat responses, source items, indexing responses, and deletion
-responses.
+## Security model
 
-### `app/security.py`
+- `X-RAG-API-Key` authenticates the Moodle server, not individual users. Moodle remains responsible for enrolment and capability checks.
+- Retrieval is always filtered by `course_id`, `retrieval_enabled=true` and `visibility="course"`. Legacy personal chunks are never returned.
+- In the chat graph, the access scope (`course_id`, `user_id`, `include_course_documents`) is held only in the immutable `RagContext`. LLM output can change the search text, but never the scope.
+- Uploaded and retrieved text is treated as untrusted data in every prompt.
 
-Implements the `X-RAG-API-Key` authentication dependency used by the document
-and chat routers.
+## Chat generation: `app/services/llm_provider.py`
 
-The key authenticates the Moodle server to this backend. It does not itself
-verify Moodle user enrollment or permissions; that authorization remains the
-responsibility of the Moodle integration.
+This is the single provider abstraction. Every call builds a new LangChain model (`ChatOpenAI`, `ChatGoogleGenerativeAI` or `ChatOllama`) from the provider and model in the request and the current settings. That's why switching model or key in Moodle applies to the next request. Retries are disabled, the Gemini temperature is set explicitly, and no OpenAI temperature is sent, for compatibility with reasoning models.
+
+- `generate_answer_async(route, context, history, provider, model)` produces chat answers.
+- `generate_messages` / `generate_messages_async` take prebuilt message lists (suggestions, conversational replies).
+- `generate_structured` / `generate_structured_sync` return typed Pydantic output, using structured output first and falling back to JSON mode.
+- Errors are raised as `ProviderError("<provider> returned HTTP <status>: <body>")`, and cancellation propagates.
+
+## Chat workflow: `app/rag_graph/`
+
+```text
+START → classify ─conversational─► conversational_reply ───────────────────► finalize → END
+            │ course_question
+            ▼
+        rewrite_query ─► retrieve ─► grade ─relevant─► generate ─► validate ─► finalize
+            ▲    │ same query as before   │ poor, retry allowed
+            │    └───────────────────────────────────► no_context ──────────► finalize
+            └─────────────────────────┘ poor, exhausted ─► no_context
+```
+
+- **classify:**
+  - Explicit tools and slash commands always take the course path.
+  - A regex check spots greetings, thanks and small talk, and clear questions (a trailing "?", a question or study verb, or 6+ words).
+  - Only short, ambiguous messages go to an LLM classifier. If classification fails, the message is treated as a course question.
+- **conversational_reply:** a short reply from `prompts/graph/conversational.md`, which refuses academic content. There is no retrieval and no sources.
+- **rewrite_query:**
+  - First turns are not rewritten. Follow-ups with history are condensed into a standalone query, and retries are rewritten with different wording.
+  - Exact-text extraction is never rewritten.
+  - The rewritten text is used only for search. Generation always uses the original question.
+- **retrieve:** calls `vector_store.search_course` on the retrieval thread pool, using the scope from `RagContext`.
+- **grade:**
+  - Drops chunks above the relevance threshold.
+  - Retries only if chunks existed but none were close enough, up to `RAG_MAX_RETRIEVAL_ATTEMPTS` (max 3).
+- **generate:** builds the numbered `[S1..Sn]` passages and sources (`services/retrieval.py`), then calls `generate_answer_async`.
+- **validate:** a pass-through hook for a future grounding validator.
+- **no_context:** returns the standard "I couldn't find relevant text…" message.
+
+Each node logs `rag_graph.node.finish`. Every request ends with `rag_graph.finish … outcome= path= attempts= llm_calls=`. A clear first-turn question makes no extra LLM calls; the worst case is 1 classify plus 2 rewrites.
 
 ## Prompt system
 
-### `app/prompt_registry.py`
+- **`prompt_registry.py`** defines each tool: its ID, label, slash command, prompt file and optional `top_k`.
+- **`prompt_router.py`** picks a tool in this order:
+  1. explicit `tool_id`;
+  2. slash command (`/exam`, `/summarize`, …);
+  3. rule-based patterns;
+  4. the `ask` default.
+- **`prompt_builder.py`** combines the core prompts with the selected tool prompt, the context, the history and the question. Prompt files are cached by modification time, so edits apply without a restart. Known bug ERR-001: `_fill` re-substitutes placeholders inside inserted values.
+- **`prompts/core/`** holds the shared role, grounding and answer-format instructions.
+- **`prompts/tools/`** holds one task prompt per tool.
+- **`prompts/graph/`** holds the classifier, query-rewrite and conversational prompts used by the graph.
 
-Defines the supported prompt tools and their metadata:
+## Document, embedding and retrieval services
 
-- Tool ID and display label.
-- Description and slash command.
-- Prompt filename.
-- Retrieval mode and optional `top_k` value.
-- Natural-language aliases.
+- **`document_parser.py`** extracts page- or slide-aware text:
+  - PDF via PyMuPDF;
+  - DOCX via python-docx;
+  - PPTX via python-pptx;
+  - TXT and MD as UTF-8.
 
-It also provides the tool menu returned by the chat API.
+  Scanned PDFs need OCR, which isn't included.
+- **`chunker.py`** creates overlapping character windows (`CHUNK_SIZE`/`CHUNK_OVERLAP`) and keeps each chunk's page number.
+- **`embedding_provider.py`** produces embeddings through OpenAI, Gemini or Ollama, configured only in `.env` with `EMBEDDING_PROVIDER`/`EMBEDDING_MODEL`.
+- **`vector_store.py`:**
+  - opens the Chroma collection for the active embedding model, named `<prefix>_<provider>_<model>_<hash>`;
+  - indexes and replaces documents;
+  - searches with course scoping;
+  - deletes documents and toggles retrieval;
+  - migrates legacy metadata;
+  - reports retrieval status.
+- **`retrieval.py`:**
+  - the lazily created retrieval thread pool;
+  - `enabled_only`;
+  - `filter_by_relevance` (logs `chat.retrieval.filtered`);
+  - `build_context_and_sources`;
+  - `NO_CONTEXT_ANSWER`.
+- **`suggestion_generator.py`** produces three document-grounded starter questions via `generate_structured_sync`, with a deterministic fallback.
+- **`illustrations.py`** generates `/explain` images with the Moodle-selected image provider. Images are stored under `storage/illustrations/` and served via signed URLs.
 
-### `app/prompt_router.py`
-
-Selects a tool from:
-
-1. An explicitly supplied `tool_id`.
-2. A slash command such as `/exam` or `/summarize`.
-3. Rule-based natural-language patterns.
-4. The default `ask` tool.
-
-Routing is local and rule-based; it does not make a second LLM classifier request.
-
-### `app/prompt_builder.py`
-
-Loads the shared core prompts and the selected tool prompt, then combines them
-with the retrieved course context and conversation history into the final
-message bundle sent to Ollama.
-
-Prompt files are cached per process, so FastAPI must be restarted after editing
-them.
-
-### `app/prompts/core/`
-
-Shared instructions used by every tool:
-
-- `instructions.md` — defines the assistant's role and general behavior.
-- `grounding.md` — requires answers to stay grounded in retrieved material.
-- `answer_format.md` — defines the expected answer and source-marker format.
-
-### `app/prompts/tools/`
-
-Task-specific instructions selected by the prompt router:
-
-- `ask.md` — ordinary course questions.
-- `concept_explanation.md` — step-by-step explanations.
-- `exact_text_extraction.md` — exact or verbatim source extraction.
-- `exam_generation.md` — original exam-question generation.
-- `flashcards.md` — question-and-answer revision cards.
-- `note_making.md` — structured revision notes.
-- `practice_quiz.md` — practice quiz generation.
-- `study_guide.md` — study-guide organization.
-- `summarization.md` — summaries of retrieved material.
-
-All tools currently use the same course-scoped retrieval path. Document-type
-metadata is not yet available to separate lecture slides from past papers.
-
-## Document and retrieval services
-
-### `app/services/document_parser.py`
-
-Extracts text into page- or slide-aware sections:
-
-- PDF pages through PyMuPDF.
-- DOCX paragraphs and tables through `python-docx`.
-- PPTX slides and tables through `python-pptx`.
-- UTF-8 text and Markdown files.
-
-Scanned-PDF OCR is not included. The parser raises a clear error when no
-extractable text is found.
-
-### `app/services/chunker.py`
-
-Normalizes extracted text and divides it into overlapping character windows.
-Each chunk retains its original page or slide number for source references.
-Chunk size and overlap are controlled by application settings.
-
-### `app/services/ollama_client.py`
-
-Provides the Ollama integration:
-
-- `embed_texts()` sends document text to `/api/embed` and validates the
-  returned embeddings.
-- `generate_answer()` sends the assembled prompt to `/api/chat` and validates
-  the generated answer.
-- Handles Ollama URLs, timeouts, optional prompt logging, conversation-history
-  formatting, and API/network errors through `OllamaError`.
-
-### `app/services/vector_store.py`
-
-Manages the persistent ChromaDB collection:
-
-- Creates or opens the configured collection.
-- Generates embeddings and stores document chunks.
-- Searches course documents by course and query (personal student uploads were removed; legacy personal chunks are excluded).
-- Replaces document chunks safely during re-indexing.
-- Deletes all vectors for a document.
-- Enables or disables retrieval per document.
-- Migrates older chunks so missing `retrieval_enabled` metadata defaults to
-  enabled.
-- Reports indexed documents and enabled/disabled chunk counts.
-
-## Persistent storage
-
-### `storage/chroma/`
-
-Contains the local ChromaDB database and vector index files. These files hold
-embeddings and metadata for indexed document chunks; they are not the original
-uploaded documents.
-
-The storage path and collection name are configurable through `.env`.
-
-## Typical request flow
+## Request flows
 
 ### Indexing a document
 
 ```text
-Upload file
-    -> documents.py
-    -> document_parser.py
-    -> chunker.py
-    -> ollama_client.embed_texts()
-    -> vector_store.py
-    -> storage/chroma/
+Moodle upload (POST /api/v1/documents/index)
+    -> documents.py            validate type/size, visibility=course
+    -> document_parser.py      text per page/slide
+    -> chunker.py              overlapping chunks
+    -> vector_store.py         embedding_provider.embed_texts() → Chroma collection for the
+                               active embedding model (replaces any previous chunks of the document)
+    -> suggestion_generator.py (optional) three starter questions
 ```
 
 ### Answering a question
 
 ```text
-Chat request
-    -> chat.py
-    -> prompt_router.py
-    -> vector_store.py
-    -> ollama_client.embed_texts()
-    -> prompt_builder.py
-    -> ollama_client.generate_answer()
-    -> ChatResponse with answer and sources
+Moodle chat (POST /api/v1/chat, provider + model from Moodle)
+    -> chat.py                 prompt_router → RagContext(course, user, include flag, provider, model)
+    -> rag_graph               classify → [conversational_reply]
+                               or rewrite_query → retrieve (vector_store.search_course,
+                               embedding_provider) → grade (relevance threshold, ≤ 3 attempts)
+                               → generate (prompt_builder + llm_provider) | no_context
+    -> chat.py                 optional /explain illustration
+    -> ChatResponse            answer, sources, retrieved_chunks, retrieved_contexts
 ```
+
+### Runtime configuration (provider/model/keys)
+
+```text
+Moodle admin settings
+    -> POST /api/v1/admin/config          provider, model, keys (authenticated with X-RAG-API-Key)
+    -> admin.py                           Fernet-encrypt keys with RUNTIME_CONFIG_ENCRYPTION_KEY
+    -> storage/runtime_config.json        atomic replace
+    -> config.get_settings()              every worker reloads when the file's mtime changes
+    -> llm_provider._chat_model()         next request builds a new model with the new settings
+```
+
+Changing the **chat** model needs nothing else. Changing the **embedding** provider or model (in `.env`, then restart) switches to a different Chroma collection, so every document must be re-indexed. The previous collection stays on disk.
 
 ## Important limitations
 
-- Scanned PDFs require OCR, which is not implemented.
-- Tables and complex layouts may not extract perfectly.
+- Scanned PDFs need OCR, which isn't implemented. Tables and complex layouts may not extract perfectly.
 - Chunking uses character windows rather than semantic boundaries.
-- Indexing and answer generation are synchronous.
-- Retrieval has no calibrated similarity-confidence threshold.
-- The shared API key does not replace Moodle authorization.
-- Past-paper retrieval is not separated from other course documents.
-
-
-MAIN
-|
-|_____App/config.py
-|     Defines application configuration using Pydantic Settings
-|
-|_____App/main.py
-|     Creates and configures the FastAPI application
-|
-|_____App/security.py
-|     Implements API-key authentication
-
-
-App/schemas.py
-Handles Pydantic request and response models
-
-App/prompt_router.py
-Routes a user message to a `Tool Definition`
-
-App/prompt_registry.py
-Defines the supporting tools
-
-App/prompt_builder.py
-Builds the final prompt bundle sent to Ollama
-
-App/api/chat.py
-Defines the chatbot API
-
-App/api/documents.py
-Defines document upload and manager API
-
-App/prompts/core/answer_format.md
-Framework of instruction on how the model should response
-
-App/prompts/core/grounding.md
-Framework of instruction on how the model should verifies itself and increase the accuracy of the response
-
-App/prompts/core/instructions
-Defines the LLM role
-
-App/prompts/tools/ask.md
-Framework to prompt model on how to response to simple question
-
-App/prompts/tools/concept_explanation.md
-Framework to prompt model on how to explain specific topic or concept
-
-App/prompts/tools/exact_text_extraction.md
-Framework to prompt model on how to give the text on specific page
-
-App/prompts/tools/exam_generations.md
-Framework to prompt model on how to generate exam question based on specific topic user ask
-
-App/prompts/tools/flashcards.md
-Framework to prompt model on how to create flashcard based on specific topic user ask
-
-App/prompts/tools/note_making.md
-Framework to prompt model on how to generate note based on specific topic user ask
-
-App/prompts/tools/practice_quiz.md
-Framework to prompt model on how to generate quiz for practice on specific topic user ask
-
-App/prompts/tools/study_guide.md
-Framework to prompt model on how to generate study guide on specific topic user ask
-
-App/prompts/tools/summarization.md
-Framework to prompt model on how to create a summary on specific topic user ask
-
-App/services/chunker.py
-Implement chunker to chunk text into smaller size
-
-App/services/ollama_client.py
-Crate document embedding and generate chat answer
-
-App/services/vector_store.py
-	
+- Indexing runs synchronously inside the request.
+- The relevance threshold is calibrated only for `openai/text-embedding-3-small`. Other embedding models are not filtered until they're calibrated (see DECISION-005).
+- Answers are not yet checked for grounding. The `validate` node is a placeholder for the deferred adaptive-retrieval-eval track.
+- The shared API key does not replace Moodle authorisation.
+- Past papers are not separated from other course documents.
