@@ -9,7 +9,10 @@ from app.schemas import DeleteResponse, IndexResponse
 from app.security import RequireApiKey
 from app.services.chunker import chunk_sections
 from app.services.document_parser import DocumentParseError, extract_sections
-from app.services.suggestion_generator import (\n    generate_document_suggestion,\n    generate_document_suggestions,\n)
+from app.services.suggestion_generator import (
+    generate_document_suggestion,
+    generate_document_suggestions,
+)
 from app.services.vector_store import (
     DocumentCourseConflictError,
     delete_document,
