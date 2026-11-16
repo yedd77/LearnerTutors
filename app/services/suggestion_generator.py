@@ -179,9 +179,13 @@ def generate_one_document_suggestion(
         json_mode=True,
     )
     text = raw.strip()
-    if text.startswith("\`\`\`"):
-        text = re.sub(r"^\`\`\`(?:json)?\s*", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\s*\`\`\`$", "", text)
+    fence = chr(96) * 3
+    if text.startswith(fence):
+        text = text[len(fence):].strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+        if text.endswith(fence):
+            text = text[:-len(fence)].strip()
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
