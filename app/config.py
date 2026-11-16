@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 import threading
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,6 +48,10 @@ class Settings(BaseSettings):
     ollama_embed_model: str = "nomic-embed-text"
     ollama_timeout_seconds: int = 180
 
+    # LangSmith tracing would send student questions and course content to a
+    # third party, so it stays off unless explicitly enabled.
+    langsmith_tracing: bool = False
+
     embedding_provider: str = "openai"
     embedding_model: str = ""
 
@@ -85,6 +90,21 @@ class Settings(BaseSettings):
             "ollama": self.ollama_embed_model,
         }
         return defaults.get(self.embedding_provider.lower(), "")
+
+
+_TRACING_ENV_VARS = ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2")
+
+
+def apply_tracing_policy(settings: "Settings | None" = None) -> None:
+    """Force LangSmith tracing off unless LANGSMITH_TRACING is enabled in Settings.
+
+    Call this at process start, before LangChain runs: langsmith caches the
+    environment lookups.
+    """
+    settings = settings or Settings()
+    if not settings.langsmith_tracing:
+        for name in _TRACING_ENV_VARS:
+            os.environ[name] = "false"
 
 
 RUNTIME_CONFIG_PATH = ROOT / "storage" / "runtime_config.json"

@@ -6,8 +6,12 @@ import uuid
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from app.api import admin, chat, documents, illustrations
-from app.config import get_settings
+from app.config import apply_tracing_policy, get_settings
+
+# Disable LangSmith tracing before any LangChain module is imported or used.
+apply_tracing_policy()
+
+from app.api import admin, chat, documents, illustrations  # noqa: E402
 
 # Configure application logging before importing/serving requests.
 s = get_settings()

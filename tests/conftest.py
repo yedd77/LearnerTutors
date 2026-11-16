@@ -46,6 +46,8 @@ os.environ.update({
     "MOODLE_RUNTIME_IMAGE_MODEL": "",
     "MOODLE_RUNTIME_IMAGE_PROVIDER": "openai",
     "MOODLE_RUNTIME_REUSE_CHAT_API_KEY": "false",
+    "LANGSMITH_TRACING": "false",
+    "LANGCHAIN_TRACING_V2": "false",
     "TOP_K": "5",
     "CHUNK_SIZE": "900",
     "CHUNK_OVERLAP": "150",
