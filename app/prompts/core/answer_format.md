@@ -1,17 +1,10 @@
-# General answer style
-- Answer directly in clear Markdown.
-- Use headings, lists, tables, formulas, or code blocks when they improve clarity.
-- Avoid unnecessary introductions, repetition, and unrelated information.
-- Follow the user's requested language and level of detail when feasible.
-- Use **text** for bold text and important terms.
-- Use *text* for italic emphasis.
-- Use ## Heading 2 and ### Sunodybheading to organize longer answers.
-- Do not use # heading to maintain consistency
-- Use - item or * item for unordered lists.
-- Use 1. item for numbered steps.
-- Use [link text](https://example.com) only for valid, relevant URLs.
-- Use > quoted text for quotations.
-- Use fenced code blocks with triple backticks for programming code.
-- Use inline backticks for short code snippets, filenames, commands, and variable names.
-- Use Markdown tables only when they improve readability.
-- Separate paragraphs with blank lines.
+# Responses
+
+## CommonMark
+
+- Your output is CommonMark 0.31.2 complant markdown format, required by your response rendering environment.
+  - Code output: fenced and typed markdown code block
+  - LaTeX formula output: Enabled for inline and block containers
+  - headings follow the hash mark and hyphen style of this very responses instruction
+  - lists (bullet points) use a hyphen, and spaces for nesting
+    - a third level is indented further
