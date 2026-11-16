@@ -1,5 +1,6 @@
 """Retrieval helpers shared by the chat endpoint and the RAG graph."""
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from app.config import Settings, get_settings
@@ -16,11 +17,33 @@ NO_CONTEXT_ANSWER = (
 # Retrieval uses Chroma's synchronous client and synchronous embedding SDKs.
 # Keep this I/O-heavy work off the event loop and independent of Starlette's
 # smaller default worker pool. Tune with RETRIEVAL_WORKERS for the host.
-_settings = get_settings()
-retrieval_executor = ThreadPoolExecutor(
-    max_workers=max(1, _settings.retrieval_workers),
-    thread_name_prefix="rag-retrieval",
-)
+# Created lazily so an app shutdown (lifespan) can stop it and a later
+# startup in the same process gets a fresh pool.
+_executor: ThreadPoolExecutor | None = None
+_executor_lock = threading.Lock()
+
+
+def get_retrieval_executor() -> ThreadPoolExecutor:
+    global _executor
+    with _executor_lock:
+        if _executor is None:
+            _executor = ThreadPoolExecutor(
+                max_workers=max(1, get_settings().retrieval_workers),
+                thread_name_prefix="rag-retrieval",
+            )
+        return _executor
+
+
+def shutdown_retrieval_executor() -> bool:
+    """Stop the pool without waiting for in-flight searches. Returns False if none was running."""
+    global _executor
+    with _executor_lock:
+        executor, _executor = _executor, None
+    if executor is None:
+        return False
+    executor.shutdown(wait=False, cancel_futures=True)
+    return True
+
 
 _warned_uncalibrated: set[tuple[str, str]] = set()
 

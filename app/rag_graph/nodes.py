@@ -166,7 +166,7 @@ async def retrieve(state: RagState, runtime: Runtime[RagContext]) -> dict:
                      ctx.request_id, ctx.course_id, top_k, state.get("attempts", 0) + 1)
     loop = asyncio.get_running_loop()
     matches = await loop.run_in_executor(
-        retrieval.retrieval_executor,
+        retrieval.get_retrieval_executor(),
         vector_store.search_course,
         state["search_query"],          # the only model-influenced argument
         ctx.course_id,
