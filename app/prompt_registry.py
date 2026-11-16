@@ -1,3 +1,4 @@
+"""The prompt tools (slash commands) the assistant supports, and their metadata."""
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -7,6 +8,11 @@ PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 # Define a tool with its metadata and prompt file
 @dataclass(frozen=True)
 class ToolDefinition:
+    """One tool: its menu text, slash command, prompt file and retrieval settings.
+
+    ``top_k`` overrides the global TOP_K for tools that need more context;
+    ``aliases`` are informational phrases for the tool.
+    """
     id: str
     label: str
     description: str
@@ -107,6 +113,7 @@ TOOLS: dict[str, ToolDefinition] = {
 
 # Return a supported tool; reject unknown IDs
 def get_tool(tool_id: str) -> ToolDefinition:
+    """Return the tool with this ID, or raise ValueError("Unsupported tool_id: ...")."""
     try:
         return TOOLS[tool_id]
     except KeyError as exc:
@@ -114,6 +121,7 @@ def get_tool(tool_id: str) -> ToolDefinition:
 
 # return the list of supported tools for a UI command menu
 def get_tool_menu() -> list[dict[str, str]]:
+    """Return ``id``, ``command``, ``label`` and ``description`` for every tool, in menu order."""
     return [
         {
             "id": tool.id,

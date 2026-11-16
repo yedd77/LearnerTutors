@@ -1,16 +1,54 @@
+"""Pick the prompt tool for a chat message (explicit tool, slash command or wording)."""
 from dataclasses import dataclass
 import re
 from typing import Optional
-from app.prompt_registry import ToolDefinition, get_tool
+from app.prompt_registry import TOOLS, ToolDefinition, get_tool
+
 
 # Route a message to the correct tool based on its content
 @dataclass(frozen=True)
 class RouteResult:
+    """The chosen tool, the message text to use (slash command removed), and how it was chosen."""
     tool: ToolDefinition
     question: str
     explicit_command: bool
 
+
+# Natural-language patterns, checked in order against the lower-cased message.
+# The first tool with a matching pattern wins; nothing matching means "ask".
+_PATTERN_ROUTES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("exact_text_extraction", (
+        r"\bverbatim\b",
+        r"\bexact wording\b",
+        r"\bquote (?:this|the following|the text)\b",
+        r"\bextract (?:the exact|verbatim)\b",
+        r"\bcopy .+ exactly\b",
+    )),
+    ("exam_generation", (
+        r"\b(?:create|generate|make|write|prepare|design)\b.{0,70}"
+        r"\b(?:exam questions?|examination questions?|mock exam|exam paper|"
+        r"mcqs?|multiple.choice questions?|test questions?)\b",
+    )),
+    ("note_making", (r"\b(?:make|create|prepare|write)\b.{0,60}\b(?:revision notes|study notes|notes)\b",)),
+    ("summarization", (r"\b(?:summari[sz]e|summarise|summary)\b",)),
+    ("flashcards", (r"\bflashcards?\b|\bstudy cards\b",)),
+    ("practice_quiz", (r"\b(?:practice quiz|quiz me|test me|practice questions)\b",)),
+    ("study_guide", (r"\b(?:study guide|revision plan|study plan)\b",)),
+    ("concept_explanation", (r"\b(?:explain|teach me|walk me through)\b",)),
+)
+
+
 def route_message(message: str, requested_tool_id: Optional[str] = None) -> RouteResult:
+    """Choose a tool for ``message``, in priority order.
+
+    1. ``requested_tool_id`` from Moodle (unknown IDs raise ValueError); the
+       tool's slash command is stripped if the text also starts with it.
+    2. A leading slash command such as ``/exam`` (case-insensitive), which is removed.
+    3. The first matching pattern in ``_PATTERN_ROUTES``.
+    4. The default ``ask`` tool.
+
+    Routing is local and rule-based; it never calls an LLM.
+    """
     text = (message or "").strip()
 
     # Use the explicitly requested tool if provided
@@ -25,49 +63,14 @@ def route_message(message: str, requested_tool_id: Optional[str] = None) -> Rout
     parts = text.split(maxsplit=1)
     first = parts[0] if parts else ""
     rest = parts[1] if len(parts) > 1 else ""
-    from app.prompt_registry import TOOLS
     for tool in TOOLS.values():
         if tool.command and first.lower() == tool.command.lower():
             return RouteResult(tool=tool, question=rest.strip(), explicit_command=True)
 
-    lower = text.lower()
-
     # Check for patterns that indicate a specific tool should be used
-    exact_patterns = (
-        r"\bverbatim\b",
-        r"\bexact wording\b",
-        r"\bquote (?:this|the following|the text)\b",
-        r"\bextract (?:the exact|verbatim)\b",
-        r"\bcopy .+ exactly\b",
-    )
-    
-    # If any of the exact patterns match, route to the exact text extraction tool
-    if any(re.search(pattern, lower) for pattern in exact_patterns):
-        return RouteResult(get_tool("exact_text_extraction"), text, False)
-    exam_patterns = (
-        r"\b(?:create|generate|make|write|prepare|design)\b.{0,70}"
-        r"\b(?:exam questions?|examination questions?|mock exam|exam paper|"
-        r"mcqs?|multiple.choice questions?|test questions?)\b",
-    )
-    if any(re.search(pattern, lower) for pattern in exam_patterns):
-        return RouteResult(get_tool("exam_generation"), text, False)
-
-    if re.search(r"\b(?:make|create|prepare|write)\b.{0,60}\b(?:revision notes|study notes|notes)\b", lower):
-        return RouteResult(get_tool("note_making"), text, False)
-
-    if re.search(r"\b(?:summari[sz]e|summarise|summary)\b", lower):
-        return RouteResult(get_tool("summarization"), text, False)
-
-    if re.search(r"\bflashcards?\b|\bstudy cards\b", lower):
-        return RouteResult(get_tool("flashcards"), text, False)
-
-    if re.search(r"\b(?:practice quiz|quiz me|test me|practice questions)\b", lower):
-        return RouteResult(get_tool("practice_quiz"), text, False)
-
-    if re.search(r"\b(?:study guide|revision plan|study plan)\b", lower):
-        return RouteResult(get_tool("study_guide"), text, False)
-
-    if re.search(r"\b(?:explain|teach me|walk me through)\b", lower):
-        return RouteResult(get_tool("concept_explanation"), text, False)
+    lower = text.lower()
+    for tool_id, patterns in _PATTERN_ROUTES:
+        if any(re.search(pattern, lower) for pattern in patterns):
+            return RouteResult(get_tool(tool_id), text, False)
 
     return RouteResult(get_tool("ask"), text, False)
