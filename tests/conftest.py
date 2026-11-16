@@ -49,6 +49,8 @@ os.environ.update({
     "LANGSMITH_TRACING": "false",
     "LANGCHAIN_TRACING_V2": "false",
     "TOP_K": "5",
+    # Real embedding distances are model-specific; the fake embeddings are not calibrated.
+    "RETRIEVAL_MAX_DISTANCE": "0",
     "CHUNK_SIZE": "900",
     "CHUNK_OVERLAP": "150",
     "MAX_UPLOAD_MB": "1",

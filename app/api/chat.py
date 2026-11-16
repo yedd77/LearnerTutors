@@ -27,6 +27,33 @@ _retrieval_executor = ThreadPoolExecutor(
 )
 
 
+_warned_uncalibrated: set[tuple[str, str]] = set()
+
+
+def _filter_by_relevance(matches: list[dict], settings, request_id: str) -> list[dict]:
+    """Drop chunks too far from the question (cosine distance above the threshold)."""
+    if not matches:
+        return matches
+    threshold = settings.resolved_retrieval_max_distance
+    if threshold <= 0:
+        embedding = (settings.embedding_provider.lower(), settings.resolved_embedding_model)
+        if settings.retrieval_max_distance is None and embedding not in _warned_uncalibrated:
+            _warned_uncalibrated.add(embedding)
+            logger.warning(
+                "chat.retrieval.threshold_disabled embedding=%s/%s reason=uncalibrated_model "
+                "(set RETRIEVAL_MAX_DISTANCE to enable)", *embedding,
+            )
+        return matches
+    kept = [m for m in matches if m.get("distance") is None or m["distance"] <= threshold]
+    distances = [m["distance"] for m in matches if m.get("distance") is not None]
+    logger.info(
+        "chat.retrieval.filtered id=%s dropped=%s kept=%s threshold=%.3f best_distance=%s",
+        request_id, len(matches) - len(kept), len(kept), threshold,
+        f"{min(distances):.3f}" if distances else "n/a",
+    )
+    return kept
+
+
 @router.get("/tools")
 def list_tools():
     return {"tools": get_tool_menu()}
@@ -94,6 +121,7 @@ async def ask(request: ChatRequest, http_request: Request):
             match for match in matches
             if match["metadata"].get("retrieval_enabled", True)
         ]
+        matches = _filter_by_relevance(matches, settings, request_id)
         if not matches:
             logger.info(
                 "chat.no_context id=%s total_ms=%.2f",

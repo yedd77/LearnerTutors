@@ -10,6 +10,15 @@ from cryptography.fernet import Fernet, InvalidToken
 load_dotenv()
 ROOT = Path(__file__).resolve().parent.parent
 
+# Relevance cut-offs measured per embedding model (provider, model). Distances are not
+# comparable across embedding models, so unlisted models get no default threshold.
+# text-embedding-3-small, 2026-11-16, 291 indexed chunks in 3 courses: on-topic best
+# match 0.19-0.63, other-course topics 0.64-0.87, off-topic 0.77-0.94.
+CALIBRATED_MAX_DISTANCE: dict[tuple[str, str], float] = {
+    ("openai", "text-embedding-3-small"): 0.70,
+}
+
+
 class Settings(BaseSettings):
     app_name: str = "RAG Assistant API"
     app_env: str = "development"
@@ -58,6 +67,10 @@ class Settings(BaseSettings):
     chroma_path: str = "./storage/chroma"
     chroma_collection: str = "ragassistant_chunks"
     top_k: int = 5
+    # Drop retrieved chunks whose cosine distance is above this value, so off-topic
+    # questions get the no-context reply. Unset = use the calibrated default for the
+    # active embedding model (see CALIBRATED_MAX_DISTANCE); 0 = disabled.
+    retrieval_max_distance: float | None = None
     retrieval_workers: int = 64
     chunk_size: int = 900
     chunk_overlap: int = 150
@@ -79,6 +92,14 @@ class Settings(BaseSettings):
             path = ROOT / path
         path.mkdir(parents=True, exist_ok=True)
         return str(path)
+
+    @property
+    def resolved_retrieval_max_distance(self) -> float:
+        """Effective relevance threshold; 0 means no filtering."""
+        if self.retrieval_max_distance is not None:
+            return max(0.0, self.retrieval_max_distance)
+        key = (self.embedding_provider.lower(), self.resolved_embedding_model)
+        return CALIBRATED_MAX_DISTANCE.get(key, 0.0)
 
     @property
     def resolved_embedding_model(self) -> str:
