@@ -1,6 +1,7 @@
 import logging
 import time
 from pathlib import Path
+import json
 from typing import Annotated
 
 from pydantic import BaseModel
@@ -11,7 +12,10 @@ from app.schemas import DeleteResponse, IndexResponse
 from app.security import RequireApiKey
 from app.services.chunker import chunk_sections
 from app.services.document_parser import DocumentParseError, extract_sections
-from app.services.suggestion_generator import generate_document_suggestions
+from app.services.suggestion_generator import (
+    generate_document_suggestions,
+    generate_one_document_suggestion,
+)
 from app.services.vector_store import (
     DocumentCourseConflictError,
     delete_document,
@@ -168,6 +172,46 @@ def regenerate_suggestions(
         document_id, len(suggestions), (time.perf_counter() - started) * 1000,
     )
     return SuggestionResponse(document_id=document_id, suggestions=suggestions)
+
+
+@router.post("/{document_id}/suggestions/{slot}")
+def generate_one_suggestion(
+    document_id: str,
+    slot: int,
+    file: Annotated[UploadFile, File()],
+    existing_suggestions: Annotated[str, Form()] = "[]",
+):
+    """Generate one document-grounded suggestion without modifying indexed vectors."""
+    if slot < 1 or slot > 3:
+        raise HTTPException(422, "slot must be between 1 and 3.")
+
+    settings = get_settings()
+    filename = Path(file.filename or "upload").name
+    if Path(filename).suffix.lower() not in {".pdf", ".docx", ".pptx", ".txt", ".md"}:
+        raise HTTPException(415, "Unsupported file type.")
+
+    content = file.file.read(settings.max_upload_mb * 1024 * 1024 + 1)
+    file.file.close()
+    if len(content) > settings.max_upload_mb * 1024 * 1024:
+        raise HTTPException(413, f"File exceeds {settings.max_upload_mb} MB.")
+    if not content:
+        raise HTTPException(400, "Uploaded file is empty.")
+
+    try:
+        sections = extract_sections(filename, content)
+        existing = json.loads(existing_suggestions or "[]")
+        if not isinstance(existing, list) or not all(isinstance(item, str) for item in existing):
+            raise ValueError("existing_suggestions must be a JSON array of strings.")
+        suggestion = generate_one_document_suggestion(filename, sections, existing)
+    except DocumentParseError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(502, f"Suggestion generation failed: {exc}") from exc
+    except Exception as exc:
+        logger.exception("Single suggestion generation failed for document %s slot %s", document_id, slot)
+        raise HTTPException(502, f"Suggestion generation failed: {exc}") from exc
+
+    return {"document_id": document_id, "slot": slot, "suggestion": suggestion}
 
 
 @router.delete("/{document_id}", response_model=DeleteResponse)
