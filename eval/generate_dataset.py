@@ -1,3 +1,13 @@
+"""Evaluation step 1: build a RAGAS question/reference dataset from eval/test_docs/.
+
+Loads the PDF/DOCX/PPTX/TXT/MD files, builds (or reuses a cached) RAGAS
+knowledge graph with a local Ollama LLM (RAGAS_LLM_MODEL) and the backend's
+Ollama embedding model, then writes eval/output/evaluation_dataset.{csv,json}
+plus a manifest. A fingerprint of documents, models and versions decides
+whether the cache and the dataset can be reused.
+
+Usage: RAGAS_LLM_MODEL=qwen2.5:7b-instruct python eval/generate_dataset.py
+"""
 import os
 import json
 import sys
@@ -54,6 +64,10 @@ CACHE_VERSION = 1
 
 # document loader
 def load_document(file_path: Path) -> list[Document]:
+    """Load one file as LangChain Documents (one per PDF page / PPTX slide; whole DOCX/TXT/MD).
+
+    Unsupported types and empty pages are skipped.
+    """
 
     extension = file_path.suffix.lower()
     documents = []
@@ -152,6 +166,7 @@ def load_document(file_path: Path) -> list[Document]:
 
 # Generate a fingerprint to detect changes in documents or models
 def generate_fingerprint(all_documents: list[Document]) -> str:
+    """SHA-256 over document contents, models, RAGAS version and settings, for cache invalidation."""
 
     document_data = [
         {
@@ -183,6 +198,7 @@ def generate_fingerprint(all_documents: list[Document]) -> str:
 
 # Save JSON metadata
 def save_manifest(path: Path, data: dict):
+    """Write JSON metadata atomically (temporary file, then rename)."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -203,6 +219,7 @@ def make_filters_safe(transform):
         original_filter = transform.custom_filter
 
         async def safe_filter(node, kg):
+            """Run the original filter; on error keep the node rather than abort the run."""
             try:
                 return await original_filter(node, kg)
             except Exception as e:
@@ -220,6 +237,7 @@ def make_headlines_safe(transform):
     original_extract = transform.extract
 
     async def safe_extract(node):
+        """Run the original extractor; on error record no headlines for this node."""
         try:
             return await original_extract(node)
         except Exception as e:

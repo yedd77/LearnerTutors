@@ -1,3 +1,13 @@
+"""Evaluation step 2: ask the running backend every dataset question and record the answers.
+
+Posts each question to the chat endpoint (as course --course-id / user
+--user-id, with the generation --provider/--model, default: the model selected
+in Moodle) and stores the answer and retrieved contexts in
+eval/output/rag_responses.csv. Transient errors are retried with backoff, and
+progress is saved after every question so a run can be resumed.
+
+Cost: each question is a real chat request (embedding + up to 4 LLM calls).
+"""
 import argparse
 import hashlib
 import json
@@ -34,6 +44,7 @@ OUTPUT_COLUMNS = [
 
 
 def load_env():
+    """Load the repository .env if python-dotenv is installed (RAG_API_KEY etc.)."""
     try:
         from dotenv import load_dotenv
         load_dotenv(PROJECT_ROOT / ".env")
@@ -42,6 +53,7 @@ def load_env():
 
 
 def parse_args():
+    """Parse options and require RAG_API_KEY, a course/user ID and a provider/model."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     default_input = OUTPUT_DIR / "evaluation_dataset_filtered.csv"
     if not default_input.exists():
@@ -86,16 +98,19 @@ def parse_args():
 
 
 def redact(text, secret):
+    """Replace every occurrence of ``secret`` in ``text`` with *** before logging it."""
     text = str(text)
     return text.replace(secret, "***") if secret else text
 
 
 def make_row_id(question, reference):
+    """Stable 16-character ID from the question and reference, used to resume runs."""
     raw = f"{question}\x1f{reference}".encode("utf-8")
     return hashlib.sha1(raw).hexdigest()[:16]
 
 
 def load_questions(path, limit):
+    """Load the dataset, drop single-hop and blank rows, add row IDs and de-duplicate."""
     if not path.exists():
         sys.exit(f"Input dataset not found: {path}")
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
@@ -156,6 +171,7 @@ def discover_endpoint(session, base_url, headers, timeout):
 
 
 def retry_after_seconds(resp):
+    """Seconds from a numeric Retry-After header, or None."""
     val = resp.headers.get("Retry-After")
     if val and val.strip().isdigit():
         return float(val.strip())
@@ -218,6 +234,7 @@ def ask(session, url, headers, payload, args):
 
 
 def load_existing(path):
+    """Return previously collected rows keyed by row_id."""
     if not path.exists():
         return {}
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
@@ -225,6 +242,7 @@ def load_existing(path):
 
 
 def save_atomic(path, records, order):
+    """Write results atomically, in dataset order, keeping rows from earlier datasets."""
     path.parent.mkdir(parents=True, exist_ok=True)
     ordered = [records[i] for i in order if i in records]
     leftovers = [r for i, r in records.items() if i not in set(order)]  # keep rows from earlier datasets
@@ -239,6 +257,7 @@ def save_atomic(path, records, order):
 
 
 def main():
+    """Collect an answer for every pending question, saving after each one."""
     load_env()
     args = parse_args()
 

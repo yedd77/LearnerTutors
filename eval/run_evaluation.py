@@ -1,3 +1,12 @@
+"""Evaluation step 3: score collected RAG responses with RAGAS.
+
+Reads eval/output/rag_responses.csv (from run_rag_response.py) and computes
+faithfulness, answer relevancy, context precision and context recall with an
+OpenAI-compatible evaluator (RAGAS_BASE_URL, default local Ollama; model
+RAGAS_LLM_MODEL). Results are saved after every row, so an interrupted run
+resumes where it stopped. Writes eval/results/evaluation_results.csv and
+evaluation_summary.json.
+"""
 from __future__ import annotations
 
 import argparse
@@ -38,6 +47,7 @@ METRIC_COLUMNS = [
 
 
 def parse_args() -> argparse.Namespace:
+    """Command-line options: input/output paths, row limit, pacing, timeout and retries."""
     parser = argparse.ArgumentParser(
         description="Evaluate collected RAG responses using RAGAS 0.4.3."
     )
@@ -78,6 +88,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_input(path: Path, limit: int | None) -> pd.DataFrame:
+    """Load collected responses, dropping rows that failed collection or have empty fields."""
     if not path.exists():
         raise FileNotFoundError(f"Input CSV not found: {path}")
 
@@ -109,6 +120,7 @@ def load_input(path: Path, limit: int | None) -> pd.DataFrame:
 
 
 def parse_contexts(value: str, row_number: int) -> list[str]:
+    """Decode the JSON array of retrieved contexts, dropping blank entries."""
     try:
         parsed = json.loads(value)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -174,6 +186,7 @@ def make_evaluators(timeout: float):
 
 
 def load_existing_results(path: Path) -> dict[str, dict[str, Any]]:
+    """Return earlier results keyed by row_id, so finished rows are not re-scored."""
     if not path.exists():
         return {}
 
@@ -189,11 +202,13 @@ def load_existing_results(path: Path) -> dict[str, dict[str, Any]]:
 
 
 def stable_row_id(row: pd.Series, index: int) -> str:
+    """The row's row_id, or a positional ID when the input has none."""
     row_id = str(row.get("row_id", "")).strip()
     return row_id or f"row-{index + 1:06d}"
 
 
 def save_results(path: Path, records: dict[str, dict[str, Any]], order: list[str]) -> None:
+    """Write all results in input order with a fixed column set."""
     path.parent.mkdir(parents=True, exist_ok=True)
     ordered = [records[key] for key in order if key in records]
     columns = [
@@ -224,6 +239,11 @@ async def score_one(
     metrics: dict[str, Any],
     max_retries: int,
 ) -> dict[str, Any]:
+    """Score one row with every metric, retrying each with backoff (5s, 10s, ... max 30s).
+
+    A metric that keeps failing gets an empty score and its error is recorded;
+    the other metrics are still scored.
+    """
     contexts = parse_contexts(row["retrieved_contexts"], row_number)
 
     sample = {
@@ -300,6 +320,7 @@ def write_summary(
     embedding_model: str,
     base_url: str,
 ) -> None:
+    """Write evaluator details, row counts and mean/median per metric to JSON."""
     summary: dict[str, Any] = {
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "ragas_version": "0.4.3",
@@ -327,6 +348,7 @@ def write_summary(
 
 
 async def run() -> int:
+    """Score every pending row, saving after each one; return the process exit code."""
     args = parse_args()
     source = load_input(args.input, args.limit)
 
