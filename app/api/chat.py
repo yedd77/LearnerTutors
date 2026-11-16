@@ -81,7 +81,6 @@ async def ask(request: ChatRequest, http_request: Request):
             search_course,
             question,
             request.course_id,
-            request.user_id,
             request.include_course_documents,
             route.tool.top_k or settings.top_k,
         )

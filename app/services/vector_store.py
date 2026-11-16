@@ -123,13 +123,16 @@ def _chunk_id(document_id: str, index: int, text: str) -> str:
 
     return f"{document_id}_{index}_{digest}"
 
+# Visibility stored on every chunk. Personal (student-owned) uploads were removed, so
+# course-wide documents are the only kind that can be indexed or retrieved.
+COURSE_VISIBILITY = "course"
+
 # Index a document in the vector store.
 def index_document(
     document_id: str,
     filename: str,
     course_id: int,
     owner_id: int,
-    visibility: str,
     chunks: list[dict],
     retrieval_enabled: Optional[bool] = None,
 ) -> int:
@@ -186,7 +189,7 @@ def index_document(
                     "filename": filename[:255],
                     "course_id": int(course_id),
                     "owner_id": int(owner_id),
-                    "visibility": visibility,
+                    "visibility": COURSE_VISIBILITY,
                     "retrieval_enabled": bool(retrieval_enabled),
                     "page": (
                         int(chunk["page"])
@@ -332,30 +335,24 @@ def delete_document(document_id: str, course_id: int) -> int:
 def search_course(
     question: str,
     course_id: int,
-    user_id: int,
     include_course_documents: bool,
     top_k: int,
 ) -> list[dict]:
     """Search only enabled chunks the user is allowed to access."""
+    # Course documents are the only retrievable kind. When the caller excludes
+    # them there is nothing the user may search, so do not query at all.
+    if not include_course_documents:
+        return []
+
     collection = get_collection()
 
-    visibility = [
-        {
-            "$and": [
-                {"visibility": "personal"},
-                {"owner_id": int(user_id)},
-            ]
-        }
-    ]
-
-    if include_course_documents:
-        visibility.append({"visibility": "course"})
-
+    # Chunks indexed as "personal" before student uploads were removed fail the
+    # visibility clause, so they can never be returned to anyone.
     where = {
         "$and": [
             {"course_id": int(course_id)},
             {"retrieval_enabled": True},
-            {"$or": visibility},
+            {"visibility": COURSE_VISIBILITY},
         ]
     }
 

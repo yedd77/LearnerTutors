@@ -33,13 +33,19 @@ def index_upload(
     document_id: Annotated[str, Form(min_length=1, max_length=100)],
     course_id: Annotated[int, Form(gt=0)],
     owner_id: Annotated[int, Form(gt=0)],
-    visibility: Annotated[str, Form()] = "personal",
+    visibility: Annotated[str | None, Form()] = None,
     retrieval_enabled: Annotated[bool, Form()] = True,
     generate_suggestions: Annotated[bool, Form()] = False,
 ):
     s = get_settings()
-    if visibility not in {"personal", "course"}:
-        raise HTTPException(400, "visibility must be 'personal' or 'course'.")
+    # Personal (student-owned) uploads were removed. Require an explicit course
+    # visibility: an omitted value used to mean "personal", so silently treating
+    # it as course-wide could expose a student's file to the whole course.
+    if visibility != "course":
+        raise HTTPException(
+            400,
+            "Personal document uploads are not supported; visibility must be 'course'.",
+        )
 
     started = time.perf_counter()
     filename = Path(file.filename or "upload").name
@@ -90,7 +96,6 @@ def index_upload(
             filename,
             course_id,
             owner_id,
-            visibility,
             chunks,
             retrieval_enabled=retrieval_enabled,
         )

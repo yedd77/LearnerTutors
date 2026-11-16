@@ -1,0 +1,17 @@
+# Offline RAG evaluation tooling (eval/*.py). Not needed to run the API.
+# Ranges start from the versions installed and tested on 2026-11-16.
+-r requirements.txt
+
+# Imported directly by eval/*.py
+ragas>=0.4.3,<0.5
+langchain-core>=1.0.1,<2.0
+langchain-community>=0.4,<0.4.2  # upper pin carried over from the original requirements.txt (reason not documented)
+langchain-ollama>=1.0,<2.0
+openai>=1.0,<2.0
+pandas>=3.0,<4.0
+
+# Listed in the original requirements.txt but not imported anywhere in this repo today.
+# (langchain is also a hard dependency of ragas.) Candidates for removal.
+langchain>=1.0,<2.0
+langchain-google-genai>=4.0,<5.0
+rapidfuzz>=3.0,<4.0

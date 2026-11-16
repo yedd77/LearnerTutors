@@ -228,7 +228,7 @@ Manages the persistent ChromaDB collection:
 
 - Creates or opens the configured collection.
 - Generates embeddings and stores document chunks.
-- Searches chunks by course, owner, visibility, and query.
+- Searches course documents by course and query (personal student uploads were removed; legacy personal chunks are excluded).
 - Replaces document chunks safely during re-indexing.
 - Deletes all vectors for a document.
 - Enables or disables retrieval per document.
