@@ -48,3 +48,18 @@ def test_warmup_failure_is_not_fatal(monkeypatch, caplog):
             assert client.get("/health").status_code == 200
             ready = client.get("/ready")
             assert ready.status_code == 503 and ready.json()["status"] == "not_ready"
+
+
+def test_warmup_import_error_stops_startup(monkeypatch, caplog):
+    """A broken install (ImportError) fails fast instead of serving in a not-ready state."""
+    import pytest
+
+    def missing_dependency():
+        raise ImportError("No module named 'chromadb'")
+
+    monkeypatch.setattr(vector_store, "get_collection", missing_dependency)
+    with caplog.at_level(logging.INFO, logger="app.requests"):
+        with pytest.raises(ImportError, match="chromadb"):
+            with TestClient(fastapi_app):
+                pass
+    assert any(m.startswith("startup.vector_store.import_error") for m in messages(caplog))

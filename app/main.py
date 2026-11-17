@@ -28,7 +28,11 @@ request_logger.setLevel(configured_log_level)
 
 
 async def warm_vector_store():
-    """Initialize Chroma and run its one-time metadata migration before traffic."""
+    """Initialize Chroma and run its one-time metadata migration before traffic.
+
+    A missing or broken dependency (ImportError) stops startup; any other
+    failure is logged and the service keeps running in a not-ready state.
+    """
     started = time.perf_counter()
     request_logger.info("startup.vector_store.start")
     try:
@@ -41,6 +45,10 @@ async def warm_vector_store():
             count,
             (time.perf_counter() - started) * 1000,
         )
+    except ImportError as exc:
+        # A broken install will not fix itself: fail fast with a clear message.
+        request_logger.error("startup.vector_store.import_error: %s", exc)
+        raise
     except Exception:
         request_logger.exception(
             "startup.vector_store.failed duration_ms=%.2f",
