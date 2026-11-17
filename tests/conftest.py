@@ -225,6 +225,10 @@ def stub_illustration(monkeypatch):
             self.calls = 0
             self.error: Exception | None = None
             self.url = "/api/v1/illustrations/" + "a" * 32 + "?expires=1&signature=" + "b" * 64
+            # The "would an image help?" check; says yes unless changed.
+            self.needs_image = True
+            self.check_error: Exception | None = None
+            self.checks: list[dict] = []
 
     stub = Stub()
 
@@ -234,5 +238,16 @@ def stub_illustration(monkeypatch):
             raise stub.error
         return stub.url
 
+    real_structured = chat_module.llm_provider.generate_structured
+
+    async def fake_structured(messages, schema, provider=None, model=None, **kwargs):
+        if schema is not chat_module.IllustrationDecision:
+            return await real_structured(messages, schema, provider, model, **kwargs)
+        stub.checks.append({"messages": messages, "provider": provider, "model": model})
+        if stub.check_error is not None:
+            raise stub.check_error
+        return schema(needs_image=stub.needs_image, reason="stub")
+
     monkeypatch.setattr(chat_module, "generate_illustration_async", fake_generate_illustration_async)
+    monkeypatch.setattr(chat_module.llm_provider, "generate_structured", fake_structured)
     return stub

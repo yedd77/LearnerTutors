@@ -157,15 +157,43 @@ def test_explicit_explain_command_generates_an_illustration(client, auth, stub_g
     assert body["illustration_url"] == stub_illustration.url
 
 
+def test_illustration_check_sees_question_and_answer_with_request_model(
+        client, auth, stub_generation, stub_illustration, bio):
+    ask(client, auth, "/explain photosynthesis", provider="gemini", model="gem-model")
+    [check] = stub_illustration.checks
+    assert (check["provider"], check["model"]) == ("gemini", "gem-model")
+    prompt = check["messages"][-1]["content"]
+    assert "photosynthesis" in prompt and "Stubbed answer [S1]." in prompt
+
+
+def test_explain_without_image_need_returns_answer_only(client, auth, stub_generation, stub_illustration, bio):
+    stub_illustration.needs_image = False
+    response = ask(client, auth, "/explain photosynthesis")
+    assert response.status_code == 200
+    assert len(stub_illustration.checks) == 1
+    assert stub_illustration.calls == 0
+    assert response.json()["answer"] == "Stubbed answer [S1]." and response.json()["illustration_url"] is None
+
+
+def test_failed_illustration_check_generates_no_image(client, auth, stub_generation, stub_illustration, bio):
+    stub_illustration.check_error = ProviderError("ollama structured generation timed out after 20s.")
+    response = ask(client, auth, "/explain photosynthesis")
+    assert response.status_code == 200
+    assert stub_illustration.calls == 0
+    assert response.json()["answer"] == "Stubbed answer [S1]." and response.json()["illustration_url"] is None
+
+
 def test_natural_language_explain_does_not_generate_an_illustration(client, auth, stub_generation, stub_illustration, bio):
     body = ask(client, auth, "explain photosynthesis to me").json()
     assert stub_generation.calls[0]["route"].tool.id == "concept_explanation"
     assert stub_illustration.calls == 0 and body["illustration_url"] is None
+    assert stub_illustration.checks == []
 
 
 def test_other_commands_do_not_generate_illustrations(client, auth, stub_generation, stub_illustration, bio):
     ask(client, auth, "/summarize photosynthesis")
     assert stub_illustration.calls == 0
+    assert stub_illustration.checks == []
 
 
 def test_illustration_failure_does_not_fail_the_answer(client, auth, stub_generation, stub_illustration, bio):

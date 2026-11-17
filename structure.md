@@ -98,7 +98,7 @@ All routers except `/illustrations` require the `X-RAG-API-Key` header.
   - routes the message to a prompt tool;
   - rejects an empty question after the slash command is removed (422);
   - builds a `RagContext` from the request and runs the RAG graph;
-  - for an explicit `/explain`, generates an illustration;
+  - for an explicit `/explain`, first asks the chat model whether an image would help (`prompts/graph/illustrate.md`), and generates one only if it says yes; a failed check means no image;
   - returns `ChatResponse`.
   - Provider failures return 502.
 
