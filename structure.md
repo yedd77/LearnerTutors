@@ -128,7 +128,7 @@ All routers except `/illustrations` require the `X-RAG-API-Key` header.
 
 ## Chat generation: `app/services/llm_provider.py`
 
-This is the single provider abstraction. Every call builds a new LangChain model (`ChatOpenAI`, `ChatGoogleGenerativeAI` or `ChatOllama`) from the provider and model in the request and the current settings. That's why switching model or key in Moodle applies to the next request. Retries are disabled, the Gemini temperature is set explicitly, and no OpenAI temperature is sent, for compatibility with reasoning models.
+This is the single provider abstraction. Every call builds a new LangChain model (`ChatOpenAI`, `ChatGoogleGenerativeAI` or `ChatOllama`) from the provider and model in the request and the current settings. That's why switching model or key in Moodle applies to the next request. Retries are disabled. Every provider gets an explicit temperature (default 0.5; a negative value sends none). If a model rejects it, as OpenAI reasoning models do, the call is retried once without it and that model uses its provider default for the rest of the process.
 
 - `generate_answer_async(route, context, history, provider, model)` produces chat answers.
 - `generate_messages` / `generate_messages_async` take prebuilt message lists (suggestions, conversational replies).

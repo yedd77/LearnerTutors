@@ -60,8 +60,10 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_embed_model: str = "text-embedding-3-small"
     openai_timeout_seconds: int = 120
-    # Not sent to OpenAI: reasoning models reject explicit temperatures (see llm_provider).
-    openai_temperature: float = 0
+    # Sampling temperature per provider; a negative value sends none (provider default).
+    # A model that rejects the value (e.g. OpenAI reasoning models) is retried once
+    # without it and then keeps using its own default (see llm_provider).
+    openai_temperature: float = 0.5
     openai_max_completion_tokens: int = 0
 
     gemini_api_key: str = ""
@@ -70,11 +72,12 @@ class Settings(BaseSettings):
     gemini_embed_model: str = "gemini-embedding-001"
     gemini_embed_dimensions: int = 768
     gemini_timeout_seconds: int = 180
-    gemini_temperature: float = 0.2
+    gemini_temperature: float = 0.5
     gemini_max_output_tokens: int = 0
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_embed_model: str = "nomic-embed-text"
     ollama_timeout_seconds: int = 180
+    ollama_temperature: float = 0.5
 
     # LangSmith tracing would send student questions and course content to a
     # third party, so it stays off unless explicitly enabled.

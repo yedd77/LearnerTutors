@@ -84,6 +84,67 @@ def _finish(answer: Any, provider: str, labels: _Labels) -> str:
 # ---------------------------------------------------------------------------
 # LangChain backend
 # ---------------------------------------------------------------------------
+# (provider, model) pairs that rejected an explicit temperature in this process.
+# They are sent no temperature from then on, so the provider's default applies.
+_TEMPERATURE_REJECTED: set[tuple[str, str]] = set()
+
+
+def _temperature(settings: Settings, provider: str, model: str) -> float | None:
+    """Configured temperature for this provider, or None to use the provider default."""
+    if (provider, model) in _TEMPERATURE_REJECTED:
+        return None
+    value = {
+        "openai": settings.openai_temperature,
+        "gemini": settings.gemini_temperature,
+        "ollama": settings.ollama_temperature,
+    }.get(provider, -1)
+    return value if value >= 0 else None
+
+
+def _drop_rejected_temperature(exc: BaseException, provider: str, model: str) -> bool:
+    """If ``exc`` is the provider refusing our temperature, remember it and return True.
+
+    Only a 400/422 whose body mentions "temperature" counts, and only when a
+    temperature was actually sent, so the caller retries at most once.
+    """
+    if _temperature(get_settings(), provider, model) is None:
+        return False
+    status, body = _http_details(exc)
+    if status not in (400, 422) or "temperature" not in body.lower():
+        return False
+    _TEMPERATURE_REJECTED.add((provider, model))
+    logger.warning("%s/%s rejected the configured temperature; retrying with the "
+                   "provider default and using it for this model from now on.", provider, model)
+    return True
+
+
+def _invoke(provider: str, model: str, lc_messages: list, *, json_mode: bool = False) -> Any:
+    """``invoke`` a fresh model, retrying once without temperature if the model rejects it."""
+    try:
+        return _chat_model(provider, model, json_mode=json_mode).invoke(lc_messages)
+    except Exception as exc:
+        if not _drop_rejected_temperature(exc, provider, model):
+            raise
+    return _chat_model(provider, model, json_mode=json_mode).invoke(lc_messages)
+
+
+async def _ainvoke(provider: str, model: str, lc_messages: list, *, json_mode: bool = False,
+                   schema: type[BaseModel] | None = None) -> Any:
+    """Async ``_invoke``; with ``schema`` it uses ``with_structured_output``."""
+    def build():
+        llm = _chat_model(provider, model, json_mode=json_mode)
+        return llm.with_structured_output(schema) if schema is not None else llm
+
+    try:
+        return await build().ainvoke(lc_messages)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if not _drop_rejected_temperature(exc, provider, model):
+            raise
+    return await build().ainvoke(lc_messages)
+
+
 def _chat_model(provider: str, model: str, *, json_mode: bool = False):
     """Build a new LangChain chat model from the current settings.
 
@@ -91,6 +152,7 @@ def _chat_model(provider: str, model: str, *, json_mode: bool = False):
     POST /admin/config. Retries are disabled so failures surface exactly once.
     """
     settings = get_settings()
+    temperature = _temperature(settings, provider, model)
     if provider == "openai":
         from langchain_openai import ChatOpenAI
 
@@ -101,10 +163,11 @@ def _chat_model(provider: str, model: str, *, json_mode: bool = False):
             "timeout": settings.openai_timeout_seconds,
             "max_retries": 0,
         }
-        # Omit temperature for OpenAI-compatible reasoning models that only
-        # support the API default (temperature=1). Explicit values such as
-        # 0.0 can cause the request to be rejected even when chat works.
-        # ChatOpenAI's default (None) leaves it out; openai_temperature stays unused.
+        # OpenAI-compatible reasoning models only support the API default
+        # (temperature=1) and reject other values. ChatOpenAI already drops it for
+        # gpt-5; other models that reject it are retried without it (_invoke/_ainvoke).
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         if settings.openai_max_completion_tokens > 0:
             kwargs["max_completion_tokens"] = settings.openai_max_completion_tokens
         if json_mode:
@@ -117,7 +180,7 @@ def _chat_model(provider: str, model: str, *, json_mode: bool = False):
         return ChatGoogleGenerativeAI(
             model=model,
             google_api_key=settings.gemini_api_key,
-            temperature=settings.gemini_temperature if settings.gemini_temperature >= 0 else None,
+            temperature=temperature,
             max_output_tokens=settings.gemini_max_output_tokens or None,
             timeout=settings.gemini_timeout_seconds,
             max_retries=0,
@@ -126,8 +189,10 @@ def _chat_model(provider: str, model: str, *, json_mode: bool = False):
     if provider == "ollama":
         from langchain_ollama import ChatOllama
 
+        # Explicit because Ollama's own default (usually 0.8) is high for grounded answers.
         return ChatOllama(
             model=model,
+            temperature=temperature,
             base_url=settings.ollama_base_url,
             client_kwargs={"timeout": settings.ollama_timeout_seconds},
             format="json" if json_mode else None,
@@ -214,8 +279,9 @@ def generate_messages(messages: list[dict[str, str]], provider: str | None = Non
     """Generate text using the provider and model selected in Moodle."""
     _, selected_provider, selected_model = _resolve(provider, model, _GENERATION)
     try:
-        llm = _chat_model(selected_provider, selected_model, json_mode=json_mode)
-        answer = _message_text(llm.invoke(_to_lc_messages(messages, selected_provider)))
+        answer = _message_text(_invoke(selected_provider, selected_model,
+                                       _to_lc_messages(messages, selected_provider),
+                                       json_mode=json_mode))
         return _finish(answer, selected_provider, _GENERATION)
     except ProviderError:
         raise
@@ -228,8 +294,8 @@ async def generate_messages_async(messages: list[dict[str, str]], provider: str 
     """Async counterpart of ``generate_messages`` for prebuilt message lists."""
     _, selected_provider, selected_model = _resolve(provider, model, _GENERATION)
     try:
-        llm = _chat_model(selected_provider, selected_model)
-        result = await llm.ainvoke(_to_lc_messages(messages, selected_provider))
+        result = await _ainvoke(selected_provider, selected_model,
+                                _to_lc_messages(messages, selected_provider))
         return _finish(_message_text(result), selected_provider, _GENERATION)
     except asyncio.CancelledError:
         raise
@@ -252,8 +318,8 @@ async def generate_answer_async(route: RouteResult, context: str,
         logger.debug("Chat prompt sent to %s/%s", selected_provider, selected_model)
 
     try:
-        llm = _chat_model(selected_provider, selected_model)
-        result = await llm.ainvoke(_to_lc_messages(messages, selected_provider))
+        result = await _ainvoke(selected_provider, selected_model,
+                                _to_lc_messages(messages, selected_provider))
         return _finish(_message_text(result), selected_provider, _CHAT)
     except asyncio.CancelledError:
         logger.info("Cancelled in-flight %s generation request.", selected_provider)
@@ -277,8 +343,7 @@ async def _structured_once(provider: str, model: str, messages: list[dict[str, s
     """
     lc_messages = _to_lc_messages(messages, provider)
     try:
-        llm = _chat_model(provider, model).with_structured_output(schema)
-        result = await llm.ainvoke(lc_messages)
+        result = await _ainvoke(provider, model, lc_messages, schema=schema)
         if isinstance(result, schema):
             return result
         if isinstance(result, dict):
@@ -301,7 +366,7 @@ async def _structured_once(provider: str, model: str, messages: list[dict[str, s
     )
     fallback = _to_lc_messages([{"role": "system", "content": instruction}, *messages], provider)
     try:
-        result = await _chat_model(provider, model, json_mode=True).ainvoke(fallback)
+        result = await _ainvoke(provider, model, fallback, json_mode=True)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

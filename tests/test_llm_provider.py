@@ -127,7 +127,7 @@ def test_openai_model_settings(configure):
     payload = model._get_request_payload(llm._to_lc_messages(MESSAGES, "openai"))
     assert payload["model"] == "gpt-x"
     assert payload["max_completion_tokens"] == 321
-    assert "temperature" not in payload
+    assert payload["temperature"] == 0.5
     assert payload["messages"] == [{"role": "system", "content": "Be brief."},
                                    {"role": "user", "content": "Hi"}]
 
@@ -175,6 +175,100 @@ def test_ollama_model_settings(configure):
     assert model.client_kwargs == {"timeout": 33}
     assert model.format == "json"
     assert llm._chat_model("ollama", "llama-x").format is None
+
+
+# --------------------------------------------------------------------------- temperature
+@pytest.fixture(autouse=True)
+def fresh_temperature_memory(monkeypatch):
+    """Each test starts with no model remembered as rejecting temperature."""
+    monkeypatch.setattr(llm, "_TEMPERATURE_REJECTED", set())
+
+
+TEMPERATURE_REJECTION = (
+    '{"error": {"message": "Unsupported value: \'temperature\' does not support 0.5 with '
+    'this model. Only the default (1) value is supported.", "param": "temperature"}}'
+)
+
+
+def test_default_temperature_is_half_for_every_provider(configure):
+    configure(OPENAI_API_KEY="sk-test", GEMINI_API_KEY="gm-test")
+    assert llm._chat_model("openai", "gpt-x").temperature == 0.5
+    assert llm._chat_model("gemini", "gemini-x").temperature == 0.5
+    assert llm._chat_model("ollama", "llama-x").temperature == 0.5
+
+
+def test_negative_temperature_sends_none(configure):
+    configure(OPENAI_API_KEY="sk-test", OPENAI_TEMPERATURE="-1", OLLAMA_TEMPERATURE="-1")
+    payload = llm._chat_model("openai", "gpt-x")._get_request_payload(
+        llm._to_lc_messages(MESSAGES, "openai"))
+    assert "temperature" not in payload
+    assert llm._chat_model("ollama", "llama-x").temperature is None
+
+
+class RejectsTemperatureOnce(FakeLLM):
+    """First model built raises the OpenAI 'unsupported temperature' 400; later ones answer."""
+    built = 0
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        type(self).built += 1
+        if type(self).built == 1:
+            self.error = self.structured_error = openai_status_error(400, TEMPERATURE_REJECTION)
+
+
+def test_rejected_temperature_retries_with_provider_default(configure, fake_models, caplog):
+    langchain_backend(configure)
+    RejectsTemperatureOnce.built = 0
+    fake_models.use(RejectsTemperatureOnce)
+    with caplog.at_level("WARNING", logger="app.services.llm_provider"):
+        answer = llm.generate_messages(MESSAGES, provider="openai", model="o3-x")
+    assert answer == "Fake answer."
+    assert len(fake_models.built) == 2
+    assert "rejected the configured temperature" in caplog.text
+    # Remembered: this pair is now built without a temperature; other models keep 0.5.
+    assert llm._temperature(get_settings(), "openai", "o3-x") is None
+    assert llm._temperature(get_settings(), "openai", "gpt-other") == 0.5
+
+
+def test_remembered_rejection_omits_temperature_from_real_model(configure):
+    configure(OPENAI_API_KEY="sk-test")
+    llm._TEMPERATURE_REJECTED.add(("openai", "o3-x"))
+    payload = llm._chat_model("openai", "o3-x")._get_request_payload(
+        llm._to_lc_messages(MESSAGES, "openai"))
+    assert "temperature" not in payload
+
+
+def test_rejected_temperature_retry_async_and_structured(configure, fake_models):
+    langchain_backend(configure)
+    RejectsTemperatureOnce.built = 0
+    fake_models.use(RejectsTemperatureOnce)
+    answer = asyncio.run(llm.generate_answer_async(route_message("q"), "", [], "openai", "o3-x"))
+    assert answer == "Fake answer."
+
+    llm._TEMPERATURE_REJECTED.clear()
+    RejectsTemperatureOnce.built = 0
+    fake_models.use(lambda: RejectsTemperatureOnce(structured=Card(title="x", score=1)))
+    result = asyncio.run(llm.generate_structured(MESSAGES, Card, "openai", "o3-x"))
+    assert result == Card(title="x", score=1)
+    # Retried natively, not by the JSON-mode fallback.
+    assert [json_mode for _, _, json_mode, _ in fake_models.built[-2:]] == [False, False]
+
+
+def test_other_400_errors_are_not_retried(configure, fake_models):
+    langchain_backend(configure)
+    fake_models.use(lambda: FakeLLM(error=openai_status_error(400, '{"error":"bad request"}')))
+    with pytest.raises(ProviderError, match="HTTP 400"):
+        llm.generate_messages(MESSAGES, provider="openai", model="m")
+    assert len(fake_models.built) == 1
+    assert not llm._TEMPERATURE_REJECTED
+
+
+def test_temperature_rejection_retried_only_once(configure, fake_models):
+    langchain_backend(configure)
+    fake_models.use(lambda: FakeLLM(error=openai_status_error(400, TEMPERATURE_REJECTION)))
+    with pytest.raises(ProviderError, match="HTTP 400"):
+        llm.generate_messages(MESSAGES, provider="openai", model="m")
+    assert len(fake_models.built) == 2
 
 
 def test_runtime_key_change_applies_to_next_model(configure, runtime_path):
