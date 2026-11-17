@@ -203,10 +203,11 @@ def stub_generation(monkeypatch):
 
     stub = Stub()
 
-    async def fake_generate_answer_async(route, context, history=None, provider=None, model=None):
+    async def fake_generate_answer_async(route, context, history=None, provider=None, model=None,
+                                         *, fallback=None):
         stub.calls.append({
             "route": route, "context": context, "history": history,
-            "provider": provider, "model": model,
+            "provider": provider, "model": model, "fallback": fallback,
         })
         if stub.error is not None:
             raise stub.error
@@ -243,7 +244,8 @@ def stub_illustration(monkeypatch):
     async def fake_structured(messages, schema, provider=None, model=None, **kwargs):
         if schema is not chat_module.IllustrationDecision:
             return await real_structured(messages, schema, provider, model, **kwargs)
-        stub.checks.append({"messages": messages, "provider": provider, "model": model})
+        stub.checks.append({"messages": messages, "provider": provider, "model": model,
+                            "fallback": kwargs.get("fallback")})
         if stub.check_error is not None:
             raise stub.check_error
         return schema(needs_image=stub.needs_image, reason="stub")

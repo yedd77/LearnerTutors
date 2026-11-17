@@ -16,3 +16,13 @@ class RagContext:
     request_id: str
     provider: str
     model: str
+    # Model tried once if the primary one is temporarily unavailable (from Moodle).
+    fallback_provider: str | None = None
+    fallback_model: str | None = None
+
+    @property
+    def fallback(self) -> tuple[str, str] | None:
+        """``(provider, model)`` to fall back to, or None when Moodle sent none."""
+        if self.fallback_provider and self.fallback_model:
+            return self.fallback_provider, self.fallback_model
+        return None

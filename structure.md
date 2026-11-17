@@ -130,6 +130,8 @@ All routers except `/illustrations` require the `X-RAG-API-Key` header.
 
 This is the single provider abstraction. Every call builds a new LangChain model (`ChatOpenAI`, `ChatGoogleGenerativeAI` or `ChatOllama`) from the provider and model in the request and the current settings. That's why switching model or key in Moodle applies to the next request. Retries are disabled. Every provider gets an explicit temperature (default 0.5; a negative value sends none). If a model rejects it, as OpenAI reasoning models do, the call is retried once without it and that model uses its provider default for the rest of the process.
 
+A chat request may also carry an optional `fallback_provider` + `fallback_model` (both or neither). If a chat-path call (classify, rewrite, conversational reply, answer, `/explain` image check) fails with a temporary error (429, 5xx, timeout or connection error), it is tried once on that model and logged as `llm.fallback`. Configuration errors (400/401/403/404) never fall back, and if the fallback also fails the original error is returned.
+
 - `generate_answer_async(route, context, history, provider, model)` produces chat answers.
 - `generate_messages` / `generate_messages_async` take prebuilt message lists (suggestions, conversational replies).
 - `generate_structured` / `generate_structured_sync` return typed Pydantic output, using structured output first and falling back to JSON mode.

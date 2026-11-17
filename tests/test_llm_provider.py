@@ -598,3 +598,119 @@ def test_gemini_without_key_fails_cleanly(client, auth, fake_models):
     assert response.status_code == 502
     assert response.json()["detail"] == "GEMINI_API_KEY is not configured."
     assert fake_models.built == []
+
+
+# --------------------------------------------------------------------------- fallback model
+FALLBACK = ("ollama", "local-model")
+
+
+@pytest.fixture
+def per_provider_models(monkeypatch):
+    """Model factory that fails per provider. Set ``errors[provider]``; records builds."""
+    errors: dict = {}
+    built: list = []
+
+    def fake_chat_model(provider, model, *, json_mode=False):
+        built.append((provider, model, json_mode))
+        error = errors.get(provider)
+        return FakeLLM(reply=f"answer from {provider}", error=error, structured_error=error,
+                       structured=Card(title=provider, score=1))
+
+    monkeypatch.setattr(llm, "_chat_model", fake_chat_model)
+    return errors, built
+
+
+@pytest.mark.parametrize("error", [
+    openai_status_error(503, "overloaded"),
+    openai_status_error(429, "rate limited"),
+    openai_status_error(500, "server error"),
+    httpx.ConnectError("connection refused"),
+    httpx.ReadTimeout("timed out"),
+])
+def test_temporary_failure_falls_back_to_the_other_model(configure, per_provider_models, caplog, error):
+    langchain_backend(configure)
+    errors, built = per_provider_models
+    errors["gemini"] = error
+    with caplog.at_level("WARNING", logger="app.services.llm_provider"):
+        answer = asyncio.run(llm.generate_answer_async(
+            route_message("q"), "", [], "gemini", "gem-x", fallback=FALLBACK))
+    assert answer == "answer from ollama"
+    assert [(p, m) for p, m, _ in built] == [("gemini", "gem-x"), ("ollama", "local-model")]
+    assert "llm.fallback from=gemini/gem-x to=ollama/local-model" in caplog.text
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404])
+def test_configuration_errors_do_not_fall_back(configure, per_provider_models, status):
+    langchain_backend(configure)
+    errors, built = per_provider_models
+    errors["gemini"] = openai_status_error(status, "bad config")
+    with pytest.raises(ProviderError, match=f"HTTP {status}"):
+        asyncio.run(llm.generate_answer_async(
+            route_message("q"), "", [], "gemini", "gem-x", fallback=FALLBACK))
+    assert [p for p, _, _ in built] == ["gemini"]
+
+
+def test_no_fallback_means_original_error(configure, per_provider_models):
+    langchain_backend(configure)
+    errors, built = per_provider_models
+    errors["gemini"] = openai_status_error(503, "overloaded")
+    with pytest.raises(ProviderError, match="HTTP 503"):
+        asyncio.run(llm.generate_messages_async(MESSAGES, "gemini", "gem-x"))
+    assert len(built) == 1
+
+
+def test_fallback_to_the_same_model_is_skipped(configure, per_provider_models):
+    langchain_backend(configure)
+    errors, built = per_provider_models
+    errors["ollama"] = openai_status_error(503, "busy")
+    with pytest.raises(ProviderError, match="HTTP 503"):
+        asyncio.run(llm.generate_messages_async(MESSAGES, "ollama", "local-model",
+                                                fallback=("OLLAMA", " local-model ")))
+    assert len(built) == 1
+
+
+def test_failed_fallback_raises_the_original_error(configure, per_provider_models, caplog):
+    langchain_backend(configure)
+    errors, built = per_provider_models
+    errors["gemini"] = openai_status_error(503, "overloaded")
+    errors["ollama"] = httpx.ConnectError("ollama is not running")
+    with caplog.at_level("WARNING", logger="app.services.llm_provider"):
+        with pytest.raises(ProviderError, match="^gemini returned HTTP 503: overloaded$"):
+            asyncio.run(llm.generate_messages_async(MESSAGES, "gemini", "gem-x", fallback=FALLBACK))
+    assert [p for p, _, _ in built] == ["gemini", "ollama"]
+    assert "llm.fallback.failed to=ollama/local-model" in caplog.text
+
+
+def test_structured_overload_skips_json_mode_and_falls_back(configure, per_provider_models):
+    langchain_backend(configure)
+    errors, built = per_provider_models
+    errors["gemini"] = openai_status_error(503, "overloaded")
+    result = asyncio.run(llm.generate_structured(MESSAGES, Card, "gemini", "gem-x", fallback=FALLBACK))
+    assert result == Card(title="ollama", score=1)
+    # No JSON-mode retry against the overloaded model.
+    assert built == [("gemini", "gem-x", False), ("ollama", "local-model", False)]
+
+
+def test_structured_timeout_falls_back(configure, monkeypatch):
+    langchain_backend(configure)
+
+    class Slow(FakeLLM):
+        async def ainvoke(self, messages):
+            await asyncio.sleep(5)
+
+    def factory(provider, model, *, json_mode=False):
+        if provider == "gemini":
+            return Slow()
+        return FakeLLM(structured=Card(title="local", score=2))
+
+    monkeypatch.setattr(llm, "_chat_model", factory)
+    result = asyncio.run(llm.generate_structured(MESSAGES, Card, "gemini", "gem-x",
+                                                 timeout=0.05, fallback=FALLBACK))
+    assert result == Card(title="local", score=2)
+
+
+def test_provider_error_retryable_flag():
+    assert ProviderError("x").retryable is False
+    assert llm._langchain_error(openai_status_error(502), "openai", llm._CHAT).retryable is True
+    assert llm._langchain_error(openai_status_error(401), "openai", llm._CHAT).retryable is False
+    assert llm._langchain_error(ValueError("bad json"), "openai", llm._CHAT).retryable is False

@@ -34,19 +34,23 @@ def aux(monkeypatch):
             self.reply_calls: list[list] = []
             self.reply = "Hi! Ask me about your course."
             self.reply_error: Exception | None = None
+            self.fallbacks: list = []             # fallback passed to each call
 
     stub = Aux()
 
-    async def fake_structured(messages, schema, provider=None, model=None, *, timeout=None):
+    async def fake_structured(messages, schema, provider=None, model=None, *, timeout=None,
+                              fallback=None):
         stub.structured_calls.append((schema.__name__, messages))
+        stub.fallbacks.append(fallback)
         if stub.error is not None:
             raise stub.error
         if schema is nodes.Intent:
             return schema(intent=stub.intent)
         return schema(query=stub.queries.pop(0))
 
-    async def fake_reply(messages, provider=None, model=None):
+    async def fake_reply(messages, provider=None, model=None, *, fallback=None):
         stub.reply_calls.append(messages)
+        stub.fallbacks.append(fallback)
         if stub.reply_error is not None:
             raise stub.reply_error
         return stub.reply
@@ -280,3 +284,14 @@ def test_trace_and_llm_call_count(stub_generation, aux):
                                "generate", "validate", "finalize"]
     assert result["llm_calls"] == 2          # rewrite + answer ("and where?" is a clear question)
     assert result["outcome"] == "answered" and result["attempts"] == 1
+
+
+def test_graph_llm_calls_receive_the_fallback(client, auth, stub_generation, aux, searches):
+    index_text("bio", BIO)
+    aux.intent = "course_question"
+    aux.queries = ["photosynthesis light energy"]
+    ask(client, auth, "and where?", history=HISTORY,
+        fallback_provider="ollama", fallback_model="local-model")
+    # classify ("and where?" is ambiguous) and rewrite both get it, as does generation.
+    assert aux.fallbacks and all(f == ("ollama", "local-model") for f in aux.fallbacks)
+    assert stub_generation.calls[0]["fallback"] == ("ollama", "local-model")

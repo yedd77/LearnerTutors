@@ -35,7 +35,8 @@ class IllustrationDecision(BaseModel):
 
 
 async def _illustration_needed(question: str, answer: str, provider: str, model: str,
-                               request_id: str) -> bool:
+                               request_id: str,
+                               fallback: tuple[str, str] | None = None) -> bool:
     """Ask the chat model whether an illustration would help. Fails closed.
 
     Uses the Moodle-selected chat provider/model. Any error or timeout means
@@ -45,7 +46,7 @@ async def _illustration_needed(question: str, answer: str, provider: str, model:
         decision = await llm_provider.generate_structured(
             _aux_messages("illustrate.md", question=question, answer=answer[:4000]),
             IllustrationDecision, provider, model,
-            timeout=get_settings().rag_aux_timeout_seconds,
+            timeout=get_settings().rag_aux_timeout_seconds, fallback=fallback,
         )
     except asyncio.CancelledError:
         raise
@@ -58,7 +59,8 @@ async def _illustration_needed(question: str, answer: str, provider: str, model:
 
 
 async def _illustrate(route: RouteResult, question: str, answer: str, context: str,
-                      request_id: str, provider: str, model: str) -> str | None:
+                      request_id: str, provider: str, model: str,
+                      fallback: tuple[str, str] | None = None) -> str | None:
     """Return a signed image URL for an explicit ``/explain`` request, else None.
 
     The chat model first decides whether an image would help; if it says no or
@@ -67,7 +69,7 @@ async def _illustrate(route: RouteResult, question: str, answer: str, context: s
     """
     if route.tool.id != "concept_explanation" or not route.explicit_command:
         return None
-    if not await _illustration_needed(question, answer, provider, model, request_id):
+    if not await _illustration_needed(question, answer, provider, model, request_id, fallback):
         return None
     started = time.perf_counter()
     logger.info("chat.illustration.start id=%s", request_id)
@@ -132,18 +134,17 @@ async def ask(request: ChatRequest, http_request: Request):
         history = [item.model_dump() for item in request.history]
         # Access scope comes from the request only and is passed as runtime
         # context; the graph can change the search text, never the scope.
-        result = await run_rag_graph(
-            route=route,
-            history=history,
-            context=RagContext(
-                course_id=request.course_id,
-                user_id=request.user_id,
-                include_course_documents=request.include_course_documents,
-                request_id=request_id,
-                provider=request.provider or settings.llm_provider,
-                model=request.model or settings.llm_model,
-            ),
+        rag_context = RagContext(
+            course_id=request.course_id,
+            user_id=request.user_id,
+            include_course_documents=request.include_course_documents,
+            request_id=request_id,
+            provider=request.provider or settings.llm_provider,
+            model=request.model or settings.llm_model,
+            fallback_provider=request.fallback_provider,
+            fallback_model=request.fallback_model,
         )
+        result = await run_rag_graph(route=route, history=history, context=rag_context)
         answer = result["answer"]
         matches = result.get("matches", [])
         context = result.get("context", "")
@@ -160,6 +161,7 @@ async def ask(request: ChatRequest, http_request: Request):
             route, question, answer, context, request_id,
             provider=request.provider or settings.llm_provider,
             model=request.model or settings.llm_model,
+            fallback=rag_context.fallback,
         )
 
         logger.info(

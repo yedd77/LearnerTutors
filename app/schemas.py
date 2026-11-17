@@ -1,6 +1,6 @@
 """Pydantic request and response models for the public API."""
 from typing import Literal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 class ChatHistoryMessage(BaseModel):
     """One earlier turn of the conversation, as sent by Moodle."""
@@ -24,6 +24,10 @@ class ChatRequest(BaseModel):
     # Moodle must explicitly supply the administrator-selected generation model.
     provider: Literal["openai", "gemini", "ollama"]
     model: str = Field(min_length=1, max_length=160)
+    # Optional model Moodle wants tried once when the primary one is temporarily
+    # unavailable (429, 5xx, timeout, connection error). Send both or neither.
+    fallback_provider: Literal["openai", "gemini", "ollama"] | None = None
+    fallback_model: str | None = Field(default=None, max_length=160)
 
     @field_validator("question")
     @classmethod
@@ -42,6 +46,15 @@ class ChatRequest(BaseModel):
         if not value:
             raise ValueError("A generation model must be selected in Moodle settings.")
         return value
+
+    @model_validator(mode="after")
+    def fallback_pair(self) -> "ChatRequest":
+        """Require fallback_provider and fallback_model together; blank model means none."""
+        if self.fallback_model is not None:
+            self.fallback_model = self.fallback_model.strip() or None
+        if (self.fallback_provider is None) != (self.fallback_model is None):
+            raise ValueError("Send both fallback_provider and fallback_model, or neither.")
+        return self
 
 
 class SourceItem(BaseModel):

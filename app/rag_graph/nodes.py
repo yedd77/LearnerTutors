@@ -101,6 +101,7 @@ async def classify(state: RagState, runtime: Runtime[RagContext]) -> dict:
             _aux_messages("classify.md", history=llm_provider._history_text(state.get("history", [])),
                           question=state["question"]),
             Intent, ctx.provider, ctx.model, timeout=get_settings().rag_aux_timeout_seconds,
+            fallback=ctx.fallback,
         )
         return {"intent": result.intent, "classified_by": "llm", "llm_calls": 1}
     except Exception as exc:  # fail open to the safe default; CancelledError is not an Exception
@@ -125,7 +126,8 @@ async def conversational_reply(state: RagState, runtime: Runtime[RagContext]) ->
     ]
     messages.append({"role": "user", "content": state["question"]})
     try:
-        answer = await llm_provider.generate_messages_async(messages, ctx.provider, ctx.model)
+        answer = await llm_provider.generate_messages_async(messages, ctx.provider, ctx.model,
+                                                            fallback=ctx.fallback)
     except Exception as exc:
         logger.warning("rag_graph.conversational.fallback id=%s error=%s", ctx.request_id, exc)
         answer = CONVERSATIONAL_FALLBACK
@@ -160,6 +162,7 @@ async def rewrite_query(state: RagState, runtime: Runtime[RagContext]) -> dict:
             _aux_messages("rewrite.md", retry_note=retry_note,
                           history=llm_provider._history_text(history), question=question),
             SearchQuery, ctx.provider, ctx.model, timeout=get_settings().rag_aux_timeout_seconds,
+            fallback=ctx.fallback,
         )
         query = " ".join(result.query.split())[:500] or question
     except Exception as exc:
@@ -253,7 +256,7 @@ async def generate(state: RagState, runtime: Runtime[RagContext]) -> dict:
     # Generation always uses the original question (route.question), never the search query.
     answer = await llm_provider.generate_answer_async(
         route=state["route"], context=context, history=history,
-        provider=ctx.provider, model=ctx.model,
+        provider=ctx.provider, model=ctx.model, fallback=ctx.fallback,
     )
     chat_logger.info("chat.llm.finish id=%s answer_chars=%s duration_ms=%.2f",
                      ctx.request_id, len(answer), (time.perf_counter() - started) * 1000)

@@ -261,3 +261,28 @@ def test_required_fields(client, auth, stub_generation, missing):
     body = chat_body("What is photosynthesis?")
     del body[missing]
     assert client.post(CHAT, headers=auth, json=body).status_code == 422
+
+
+# --------------------------------------------------------------------------- fallback model
+def test_fallback_model_reaches_generation_and_image_check(client, auth, stub_generation,
+                                                           stub_illustration, bio):
+    ask(client, auth, "/explain photosynthesis", provider="gemini", model="gem-x",
+        fallback_provider="ollama", fallback_model=" local-model ")
+    assert stub_generation.calls[0]["fallback"] == ("ollama", "local-model")
+    assert stub_illustration.checks[0]["fallback"] == ("ollama", "local-model")
+
+
+def test_no_fallback_by_default(client, auth, stub_generation, bio):
+    ask(client, auth)
+    assert stub_generation.calls[0]["fallback"] is None
+
+
+@pytest.mark.parametrize("extra", [
+    {"fallback_provider": "ollama"},
+    {"fallback_model": "local-model"},
+    {"fallback_provider": "ollama", "fallback_model": "   "},
+    {"fallback_provider": "mistral", "fallback_model": "m"},
+])
+def test_incomplete_or_invalid_fallback_is_rejected(client, auth, stub_generation, extra):
+    assert ask(client, auth, **extra).status_code == 422
+    assert stub_generation.calls == []

@@ -29,7 +29,16 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 
 class ProviderError(RuntimeError):
-    """A chat provider call failed or was misconfigured. The chat API maps it to 502."""
+    """A chat provider call failed or was misconfigured. The chat API maps it to 502.
+
+    ``retryable`` is True for temporary failures (429, 5xx, timeouts, connection
+    errors), where trying a fallback model can help; configuration errors such
+    as a bad key or unknown model are never retryable.
+    """
+
+    def __init__(self, message: str, *, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class _Labels(NamedTuple):
@@ -263,12 +272,61 @@ def _http_details(exc: BaseException) -> tuple[int | None, str]:
     return None, ""
 
 
+_RETRYABLE_STATUSES = {408, 429}
+
+
+def _is_connection_failure(exc: BaseException) -> bool:
+    """True if a timeout or network error appears anywhere in the cause chain."""
+    import httpx
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (TimeoutError, ConnectionError, httpx.TransportError)):
+            return True
+        # openai.APIConnectionError / APITimeoutError, without importing openai here.
+        if type(current).__name__ in ("APIConnectionError", "APITimeoutError"):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _langchain_error(exc: Exception, provider: str, labels: _Labels) -> ProviderError:
     """Wrap any provider/SDK exception as ProviderError, with the HTTP status when known."""
     status, body = _http_details(exc)
     if status is not None:
-        return ProviderError(f"{provider} returned HTTP {status}: {body}")
-    return ProviderError(f"{provider} {labels.failed}: {type(exc).__name__}: {exc}")
+        return ProviderError(f"{provider} returned HTTP {status}: {body}",
+                             retryable=status in _RETRYABLE_STATUSES or status >= 500)
+    return ProviderError(f"{provider} {labels.failed}: {type(exc).__name__}: {exc}",
+                         retryable=_is_connection_failure(exc))
+
+
+async def _with_fallback(call, provider: str | None, model: str | None,
+                         fallback: tuple[str, str] | None):
+    """Run ``call(provider, model)``; on a temporary failure, try ``fallback`` once.
+
+    Only retryable ProviderErrors fall back, and only to a different model. Each
+    switch is logged. If the fallback fails too, the original error is raised.
+    """
+    try:
+        return await call(provider, model)
+    except ProviderError as exc:
+        if not exc.retryable or not fallback:
+            raise
+        settings = get_settings()
+        primary = ((provider or settings.llm_provider).lower(), (model or settings.llm_model).strip())
+        target = (fallback[0].lower(), fallback[1].strip())
+        if target == primary:
+            raise
+        logger.warning("llm.fallback from=%s/%s to=%s/%s reason=%s",
+                       *primary, *target, str(exc)[:200])
+        try:
+            return await call(*target)
+        except ProviderError as fallback_exc:
+            logger.warning("llm.fallback.failed to=%s/%s error=%s",
+                           *target, str(fallback_exc)[:200])
+            raise exc from None
 
 
 # ---------------------------------------------------------------------------
@@ -290,44 +348,58 @@ def generate_messages(messages: list[dict[str, str]], provider: str | None = Non
 
 
 async def generate_messages_async(messages: list[dict[str, str]], provider: str | None = None,
-                                  model: str | None = None) -> str:
-    """Async counterpart of ``generate_messages`` for prebuilt message lists."""
-    _, selected_provider, selected_model = _resolve(provider, model, _GENERATION)
-    try:
-        result = await _ainvoke(selected_provider, selected_model,
-                                _to_lc_messages(messages, selected_provider))
-        return _finish(_message_text(result), selected_provider, _GENERATION)
-    except asyncio.CancelledError:
-        raise
-    except ProviderError:
-        raise
-    except Exception as exc:
-        raise _langchain_error(exc, selected_provider, _GENERATION) from exc
+                                  model: str | None = None, *,
+                                  fallback: tuple[str, str] | None = None) -> str:
+    """Async counterpart of ``generate_messages`` for prebuilt message lists.
+
+    ``fallback`` is an optional ``(provider, model)`` tried once on a temporary failure.
+    """
+    async def call(provider: str | None, model: str | None) -> str:
+        _, selected_provider, selected_model = _resolve(provider, model, _GENERATION)
+        try:
+            result = await _ainvoke(selected_provider, selected_model,
+                                    _to_lc_messages(messages, selected_provider))
+            return _finish(_message_text(result), selected_provider, _GENERATION)
+        except asyncio.CancelledError:
+            raise
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise _langchain_error(exc, selected_provider, _GENERATION) from exc
+
+    return await _with_fallback(call, provider, model, fallback)
 
 
 async def generate_answer_async(route: RouteResult, context: str,
                                 history: list[dict] | None = None,
                                 provider: str | None = None,
-                                model: str | None = None) -> str:
-    """Generate an answer with cancellable asynchronous provider requests."""
-    settings, selected_provider, selected_model = _resolve(provider, model, _CHAT)
-    messages = build_prompt_bundle(
-        route=route, context=context, history=_history_text(history or [])
-    )["messages"]
-    if settings.log_prompts:
-        logger.debug("Chat prompt sent to %s/%s", selected_provider, selected_model)
+                                model: str | None = None, *,
+                                fallback: tuple[str, str] | None = None) -> str:
+    """Generate an answer with cancellable asynchronous provider requests.
 
-    try:
-        result = await _ainvoke(selected_provider, selected_model,
-                                _to_lc_messages(messages, selected_provider))
-        return _finish(_message_text(result), selected_provider, _CHAT)
-    except asyncio.CancelledError:
-        logger.info("Cancelled in-flight %s generation request.", selected_provider)
-        raise
-    except ProviderError:
-        raise
-    except Exception as exc:
-        raise _langchain_error(exc, selected_provider, _CHAT) from exc
+    ``fallback`` is an optional ``(provider, model)`` tried once on a temporary failure.
+    """
+    async def call(provider: str | None, model: str | None) -> str:
+        settings, selected_provider, selected_model = _resolve(provider, model, _CHAT)
+        messages = build_prompt_bundle(
+            route=route, context=context, history=_history_text(history or [])
+        )["messages"]
+        if settings.log_prompts:
+            logger.debug("Chat prompt sent to %s/%s", selected_provider, selected_model)
+
+        try:
+            result = await _ainvoke(selected_provider, selected_model,
+                                    _to_lc_messages(messages, selected_provider))
+            return _finish(_message_text(result), selected_provider, _CHAT)
+        except asyncio.CancelledError:
+            logger.info("Cancelled in-flight %s generation request.", selected_provider)
+            raise
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise _langchain_error(exc, selected_provider, _CHAT) from exc
+
+    return await _with_fallback(call, provider, model, fallback)
 
 
 # Statuses where retrying in JSON mode cannot help (auth, missing model, rate limit).
@@ -353,8 +425,10 @@ async def _structured_once(provider: str, model: str, messages: list[dict[str, s
         raise
     except Exception as exc:
         status, _ = _http_details(exc)
-        if status in _NO_FALLBACK_STATUSES:
-            raise _langchain_error(exc, provider, _STRUCTURED) from exc
+        error = _langchain_error(exc, provider, _STRUCTURED)
+        # An overloaded or unreachable model will fail in JSON mode too.
+        if status in _NO_FALLBACK_STATUSES or error.retryable:
+            raise error from exc
         reason = f"{type(exc).__name__}: {exc}"
     logger.info("Structured output from %s/%s failed (%s); retrying in JSON mode.",
                 provider, model, reason[:300])
@@ -382,29 +456,35 @@ async def _structured_once(provider: str, model: str, messages: list[dict[str, s
 
 async def generate_structured(messages: list[dict[str, str]], schema: type[SchemaT],
                               provider: str | None = None, model: str | None = None,
-                              *, timeout: float | None = None) -> SchemaT:
+                              *, timeout: float | None = None,
+                              fallback: tuple[str, str] | None = None) -> SchemaT:
     """Return a validated ``schema`` instance.
 
     Tries ``with_structured_output`` first, then JSON mode plus
     ``schema.model_validate_json``. Every failure is raised as ProviderError;
-    cancellation propagates unchanged.
+    cancellation propagates unchanged. ``fallback`` is an optional
+    ``(provider, model)`` tried once on a temporary failure, with its own timeout.
     """
-    _, selected_provider, selected_model = _resolve(provider, model, _STRUCTURED)
-    run = _structured_once(selected_provider, selected_model, messages, schema)
-    try:
-        if timeout is not None:
-            return await asyncio.wait_for(run, timeout)
-        return await run
-    except asyncio.CancelledError:
-        raise
-    except ProviderError:
-        raise
-    except TimeoutError as exc:
-        raise ProviderError(
-            f"{selected_provider} structured generation timed out after {timeout}s."
-        ) from exc
-    except Exception as exc:
-        raise _langchain_error(exc, selected_provider, _STRUCTURED) from exc
+    async def call(provider: str | None, model: str | None) -> SchemaT:
+        _, selected_provider, selected_model = _resolve(provider, model, _STRUCTURED)
+        run = _structured_once(selected_provider, selected_model, messages, schema)
+        try:
+            if timeout is not None:
+                return await asyncio.wait_for(run, timeout)
+            return await run
+        except asyncio.CancelledError:
+            raise
+        except ProviderError:
+            raise
+        except TimeoutError as exc:
+            raise ProviderError(
+                f"{selected_provider} structured generation timed out after {timeout}s.",
+                retryable=True,
+            ) from exc
+        except Exception as exc:
+            raise _langchain_error(exc, selected_provider, _STRUCTURED) from exc
+
+    return await _with_fallback(call, provider, model, fallback)
 
 
 _bridge_lock = threading.Lock()
