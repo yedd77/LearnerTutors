@@ -41,8 +41,6 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
     log_prompts: bool = False
-    host: str = "127.0.0.1"
-    port: int = 8000
     # Shared Moodle-to-FastAPI secret. Source it only from the backend environment/.env.
     rag_api_key: str = Field(default="", validation_alias="RAG_API_KEY")
 
@@ -67,8 +65,6 @@ class Settings(BaseSettings):
     openai_max_completion_tokens: int = 0
 
     gemini_api_key: str = ""
-    # Not used: the Gemini SDK and LangChain integration use Google's default endpoint.
-    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     gemini_embed_model: str = "gemini-embedding-001"
     gemini_embed_dimensions: int = 768
     gemini_timeout_seconds: int = 180
