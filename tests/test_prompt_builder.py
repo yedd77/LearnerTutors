@@ -24,22 +24,33 @@ def test_fill_keeps_braces_inside_values():
     assert out == 'code: {"a": 1} and {x = 1}'
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (logged in conductor/knowledge/errors.json): _fill substitutes placeholders again "
-        "inside already-inserted values, so retrieved document text containing '{question}' or "
-        "'{history}' is rewritten. Fix in a later track, then remove this xfail."
-    ),
-)
 def test_fill_does_not_rewrite_placeholders_inside_document_text():
+    """ERR-001 regression: inserted values are never substituted again."""
     out = _fill(
         "CTX: {context}\nQ: {question}",
         context="the doc literally says {question} and {history}",
         question="REAL QUESTION",
         history="PRIVATE HISTORY",
     )
-    assert "the doc literally says {question} and {history}" in out
+    assert out == "CTX: the doc literally says {question} and {history}\nQ: REAL QUESTION"
+    assert "PRIVATE HISTORY" not in out
+
+
+def test_fill_does_not_rewrite_placeholders_in_earlier_values():
+    """Order of keyword arguments must not matter: a later key cannot rewrite an earlier value."""
+    out = _fill("{answer} | {question}", answer="mentions {question}", question="Q")
+    assert out == "mentions {question} | Q"
+
+
+def test_graph_prompt_keeps_placeholder_text_from_answers():
+    """The /explain image-check prompt receives the answer text exactly as written."""
+    from app.rag_graph.nodes import _aux_messages
+
+    messages = _aux_messages("illustrate.md", question="REAL QUESTION",
+                             answer="Template uses {question} and {history} literally.")
+    prompt = messages[-1]["content"]
+    assert "Template uses {question} and {history} literally." in prompt
+    assert prompt.count("REAL QUESTION") == 1
 
 
 def test_core_prompt_concatenates_the_shared_files():

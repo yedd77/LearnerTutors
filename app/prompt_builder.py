@@ -35,15 +35,19 @@ def _core_prompt() -> str:
 def _fill(template: str, **values: str) -> str:
     """Replace ``{name}`` placeholders with ``values``; unknown placeholders are kept.
 
-    Known bug ERR-001: a value that itself contains ``{question}`` or
-    ``{history}`` is substituted again (pinned by an xfail test).
+    Substitution is a single pass over the template, so inserted values are
+    never scanned again: retrieved text containing ``{question}`` or
+    ``{history}`` reaches the model unchanged (fixes ERR-001).
     """
     # Replace known placeholders only; do not use format(), which would interpret
     # braces that may appear in code examples or retrieved documents.
-    for key, value in values.items():
-        template = template.replace("{" + key + "}", value or "")
-    return re.sub(r"\{(\w+)\}",
-            lambda m: values.get(m.group(1), m.group(0)) or "", template)
+    def replace(match: re.Match) -> str:
+        key = match.group(1)
+        if key not in values:
+            return match.group(0)
+        return values[key] or ""
+
+    return re.sub(r"\{(\w+)\}", replace, template)
 
 # build the prompt payload for chat model
 def build_prompt_bundle(
