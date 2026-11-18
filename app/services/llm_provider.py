@@ -138,10 +138,17 @@ def _invoke(provider: str, model: str, lc_messages: list, *, json_mode: bool = F
 
 
 async def _ainvoke(provider: str, model: str, lc_messages: list, *, json_mode: bool = False,
-                   schema: type[BaseModel] | None = None) -> Any:
-    """Async ``_invoke``; with ``schema`` it uses ``with_structured_output``."""
+                   schema: type[BaseModel] | None = None,
+                   settings: Settings | None = None) -> Any:
+    """Async ``_invoke``; with ``schema`` it uses ``with_structured_output``.
+
+    ``settings`` overrides ``get_settings()`` (used to test unsaved configuration).
+    """
     def build():
-        llm = _chat_model(provider, model, json_mode=json_mode)
+        if settings is None:
+            llm = _chat_model(provider, model, json_mode=json_mode)
+        else:
+            llm = _chat_model(provider, model, json_mode=json_mode, settings=settings)
         return llm.with_structured_output(schema) if schema is not None else llm
 
     try:
@@ -154,13 +161,15 @@ async def _ainvoke(provider: str, model: str, lc_messages: list, *, json_mode: b
     return await build().ainvoke(lc_messages)
 
 
-def _chat_model(provider: str, model: str, *, json_mode: bool = False):
+def _chat_model(provider: str, model: str, *, json_mode: bool = False,
+                settings: Settings | None = None):
     """Build a new LangChain chat model from the current settings.
 
     Never cache the result: keys and limits can change at runtime through
     POST /admin/config. Retries are disabled so failures surface exactly once.
+    ``settings`` overrides ``get_settings()`` (used to test unsaved configuration).
     """
-    settings = get_settings()
+    settings = settings or get_settings()
     temperature = _temperature(settings, provider, model)
     if provider == "openai":
         from langchain_openai import ChatOpenAI
@@ -485,6 +494,26 @@ async def generate_structured(messages: list[dict[str, str]], schema: type[Schem
             raise _langchain_error(exc, selected_provider, _STRUCTURED) from exc
 
     return await _with_fallback(call, provider, model, fallback)
+
+
+async def check_generation(provider: str, model: str, settings: Settings) -> str:
+    """Send one tiny prompt to ``provider``/``model`` using ``settings`` and return the reply.
+
+    Used by the admin configuration test, so ``settings`` may hold unsaved keys.
+    No fallback model is tried. Failures are raised as ProviderError; the caller
+    validates the provider, model and key before calling this.
+    """
+    messages = [{"role": "user", "content": "Reply with the single word OK."}]
+    try:
+        result = await _ainvoke(provider, model, _to_lc_messages(messages, provider),
+                                settings=settings)
+        return _finish(_message_text(result), provider, _GENERATION)
+    except asyncio.CancelledError:
+        raise
+    except ProviderError:
+        raise
+    except Exception as exc:
+        raise _langchain_error(exc, provider, _GENERATION) from exc
 
 
 _bridge_lock = threading.Lock()

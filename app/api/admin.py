@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.config import RUNTIME_CONFIG_PATH, Settings, encrypt_provider_secret, get_settings
 from app.security import RequireApiKey
+from app.services.configuration_check import run_configuration_checks
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[RequireApiKey])
 _config_lock = threading.Lock()
@@ -27,8 +28,8 @@ _KEY_FIELDS = (
 )
 
 
-class RuntimeConfigRequest(BaseModel):
-    """Body of ``POST /admin/config``. Omitted or blank keys keep the stored value."""
+class _ProviderSelection(BaseModel):
+    """Provider/model selection and keys shared by the config and test-configuration bodies."""
     llm_provider: Literal["openai", "gemini", "ollama"]
     llm_model: str = Field(min_length=1, max_length=160)
     image_provider: Literal["openai", "gemini"] = "openai"
@@ -38,10 +39,6 @@ class RuntimeConfigRequest(BaseModel):
     gemini_api_key: str | None = None
     openai_image_api_key: str | None = None
     gemini_image_api_key: str | None = None
-    clear_openai_api_key: bool = False
-    clear_gemini_api_key: bool = False
-    clear_openai_image_api_key: bool = False
-    clear_gemini_image_api_key: bool = False
 
     @field_validator("llm_model", "image_model")
     @classmethod
@@ -59,6 +56,37 @@ class RuntimeConfigRequest(BaseModel):
         if value is None:
             return None
         return value.strip() or None
+
+
+class RuntimeConfigRequest(_ProviderSelection):
+    """Body of ``POST /admin/config``. Omitted or blank keys keep the stored value."""
+    clear_openai_api_key: bool = False
+    clear_gemini_api_key: bool = False
+    clear_openai_image_api_key: bool = False
+    clear_gemini_image_api_key: bool = False
+
+
+class ConfigurationTestRequest(_ProviderSelection):
+    """Body of ``POST /admin/test-configuration``: the settings form, saved or not.
+
+    Blank or omitted keys use the stored key. ``fallback_model`` is the Ollama
+    model for the local fallback; blank skips that test.
+    """
+    fallback_model: str = Field(default="", max_length=160)
+
+    @field_validator("fallback_model")
+    @classmethod
+    def strip_fallback_model(cls, value: str) -> str:
+        """Trim surrounding whitespace from the fallback model name."""
+        return value.strip()
+
+
+def _validate_key_lengths(request: _ProviderSelection) -> None:
+    """422 if a supplied key has an implausible length, without echoing its value."""
+    for field, _, _, _ in _KEY_FIELDS:
+        credential = getattr(request, field)
+        if credential is not None and not 20 <= len(credential) <= 512:
+            raise HTTPException(422, "Provider API keys must contain between 20 and 512 characters.")
 
 
 def _key_status(settings: Settings) -> dict[str, bool]:
@@ -101,6 +129,48 @@ def test_connection():
     return {"status": "ok", "authenticated": True}
 
 
+# Request key field -> Settings field it overrides for a configuration test.
+_TEST_KEY_OVERRIDES = {
+    "openai_api_key": "openai_api_key",
+    "gemini_api_key": "gemini_api_key",
+    "openai_image_api_key": "image_openai_api_key",
+    "gemini_image_api_key": "image_gemini_api_key",
+}
+
+
+@router.post("/test-configuration")
+async def test_configuration(request: ConfigurationTestRequest):
+    """Test the settings Moodle sent, including unsaved changes, with live provider calls.
+
+    Reaching this handler means the ``X-RAG-API-Key`` check passed (a wrong key
+    gets 401 first). The main LLM, the Ollama fallback model and image
+    generation are then tested independently and concurrently; each reports
+    ``pass``, ``fail`` or ``skipped``. Returns 200 whatever the results. Nothing
+    is saved, and key values are never returned. 422 for invalid input.
+    """
+    _validate_key_lengths(request)
+    overrides: dict[str, Any] = {
+        "llm_provider": request.llm_provider,
+        "llm_model": request.llm_model,
+        "image_provider": request.image_provider,
+        "image_model": request.image_model,
+        "reuse_chat_api_key": request.reuse_chat_api_key,
+    }
+    for field, setting in _TEST_KEY_OVERRIDES.items():
+        if getattr(request, field):
+            overrides[setting] = getattr(request, field)
+    # A temporary copy: the stored runtime configuration is not changed.
+    settings = get_settings().model_copy(update=overrides)
+
+    results = await run_configuration_checks(settings, request.fallback_model)
+    return {
+        "results": {
+            "authentication": {"status": "pass", "message": "Backend accepted the API key."},
+            **results,
+        }
+    }
+
+
 @router.get("/config")
 def read_config():
     """Return the active provider/model selection and which keys are configured."""
@@ -138,10 +208,7 @@ def update_config(request: RuntimeConfigRequest):
     if not values["llm_model"]:
         raise HTTPException(422, "A chat model is required.")
     # Validate credentials without placing their values in Pydantic error responses.
-    for field, _, _, _ in _KEY_FIELDS:
-        credential = getattr(request, field)
-        if credential is not None and not 20 <= len(credential) <= 512:
-            raise HTTPException(422, "Provider API keys must contain between 20 and 512 characters.")
+    _validate_key_lengths(request)
     if request.reuse_chat_api_key and request.llm_provider != request.image_provider:
         raise HTTPException(
             422,

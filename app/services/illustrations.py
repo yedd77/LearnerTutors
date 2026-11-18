@@ -69,7 +69,8 @@ def _selected_image_key(settings: Any) -> str:
     return key
 
 
-def _generate_openai_image(prompt: str, settings: Any, api_key: str) -> bytes:
+def _generate_openai_image(prompt: str, settings: Any, api_key: str,
+                           quality: str = "medium") -> bytes:
     """Generate a 1024x1024 PNG with the OpenAI images API and return its bytes."""
     if not settings.image_model:
         raise RuntimeError("Image generation model is not configured in Moodle settings.")
@@ -80,7 +81,7 @@ def _generate_openai_image(prompt: str, settings: Any, api_key: str) -> bytes:
             "model": settings.image_model,
             "prompt": prompt,
             "size": "1024x1024",
-            "quality": "medium",
+            "quality": quality,
             "output_format": "png",
             "n": 1,
         },
@@ -142,6 +143,27 @@ def _generate_image_bytes(question: str, answer: str, context: str) -> bytes:
     if provider == "gemini":
         return _generate_gemini_image(prompt, settings, api_key)
     raise RuntimeError(f"Unsupported image generation provider: {provider}")
+
+
+def check_image_generation(settings: Any) -> int:
+    """Generate one small test image with ``settings`` and return its size in bytes.
+
+    Used by the admin configuration test, so ``settings`` may hold unsaved keys.
+    The image is discarded: nothing is stored and no URL is created. OpenAI is
+    asked for low quality to keep the test cheap. Raises RuntimeError on failure.
+    """
+    provider = (settings.image_provider or "openai").lower()
+    api_key = _selected_image_key(settings)
+    prompt = "A simple flat icon of an open book on a plain white background. No text."
+    if provider == "openai":
+        image_bytes = _generate_openai_image(prompt, settings, api_key, quality="low")
+    elif provider == "gemini":
+        image_bytes = _generate_gemini_image(prompt, settings, api_key)
+    else:
+        raise RuntimeError(f"Unsupported image generation provider: {provider}")
+    if not image_bytes:
+        raise RuntimeError("Image provider returned an empty image.")
+    return len(image_bytes)
 
 
 def _store_image(image_bytes: bytes) -> str:

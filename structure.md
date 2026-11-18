@@ -46,6 +46,7 @@ LearnerTutors/
 |   |
 |   `-- services/
 |       |-- chunker.py          Overlapping character-window chunking
+|       |-- configuration_check.py  Live provider checks for POST /admin/test-configuration
 |       |-- document_parser.py  PDF/DOCX/PPTX/TXT/MD text extraction
 |       |-- embedding_provider.py  Embeddings via OpenAI, Gemini or Ollama
 |       |-- illustrations.py    /explain image generation (OpenAI or Gemini) and signed URLs
@@ -114,6 +115,7 @@ All routers except `/illustrations` require the `X-RAG-API-Key` header.
 - `POST /admin/connection-test` confirms that Moodle can authenticate.
 - `GET /admin/config` reports the current provider and model, and whether keys are configured. It returns booleans only, never the keys.
 - `POST /admin/config` is how Moodle pushes the chat/image provider, model and keys. The keys are Fernet-encrypted into `storage/runtime_config.json`. Embedding settings are read-only here.
+- `POST /admin/test-configuration` tests the settings form as sent, including unsaved values, without saving anything. It takes the `/admin/config` fields plus `fallback_model`; blank keys use the stored ones. It makes small real calls to the main LLM, an Ollama fallback model and the image provider, at the same time, and returns `results.{authentication, llm, fallback_model, image_generation}` with `pass`, `fail` or `skipped` and a fixed safe message. One failure does not stop the others; the response is always 200 unless the API key or input is invalid. Provider error text goes only to the server log, with keys redacted.
 
 ### `app/api/illustrations.py`
 
