@@ -53,7 +53,7 @@ def _failure_message(exc: BaseException, label: str) -> str:
     if status in (401, 403):
         return f"{label} rejected the API key (HTTP {status})."
     if status == 404:
-        return f"{label} model was not found or is not available (HTTP 404)."
+        return f"{label}: the model was not found or is not available (HTTP 404). Check the model name."
     if status == 429:
         return f"{label} is rate-limited or out of quota (HTTP 429)."
     if status is not None and status >= 500:

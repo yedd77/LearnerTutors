@@ -154,7 +154,7 @@ def test_one_failure_does_not_stop_the_others(client, auth, chat_models, image_a
 
 
 @pytest.mark.parametrize("status, expected", [
-    (404, "model was not found"),
+    (404, "Ollama fallback model: the model was not found"),
     (429, "rate-limited"),
     (503, "temporarily unavailable"),
     (400, "rejected the request (HTTP 400)"),
