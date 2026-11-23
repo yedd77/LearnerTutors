@@ -62,16 +62,17 @@ def aux(monkeypatch):
 
 @pytest.fixture
 def searches(monkeypatch):
-    """Record every search_course call while still running the real search."""
+    """Record every query sent to hybrid_search while still running the real search."""
     calls: list[dict] = []
-    real = vector_store.search_course
+    real = vector_store.hybrid_search
 
-    def spy(question, course_id, include_course_documents, top_k):
-        calls.append({"query": question, "course_id": course_id,
-                      "include": include_course_documents, "top_k": top_k})
-        return real(question, course_id, include_course_documents, top_k)
+    def spy(queries, course_id, include_course_documents, top_k):
+        for query in queries:
+            calls.append({"query": query, "course_id": course_id,
+                          "include": include_course_documents, "top_k": top_k})
+        return real(queries, course_id, include_course_documents, top_k)
 
-    monkeypatch.setattr(vector_store, "search_course", spy)
+    monkeypatch.setattr(vector_store, "hybrid_search", spy)
     return calls
 
 
@@ -274,7 +275,7 @@ def test_trace_and_llm_call_count(stub_generation, aux):
                          request_id="t", provider="openai", model="m")
     result = asyncio.run(run_rag_graph(route_message("and where?"), HISTORY, context))
     assert result["trace"] == ["classify", "rewrite_query", "retrieve", "grade",
-                               "generate", "validate", "finalize"]
+                               "refine", "generate", "validate", "finalize"]
     assert result["llm_calls"] == 2          # rewrite + answer ("and where?" is a clear question)
     assert result["outcome"] == "answered" and result["attempts"] == 1
 

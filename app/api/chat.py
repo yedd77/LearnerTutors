@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from app.config import get_settings
 from app.schemas import ChatRequest, ChatResponse, DownloadItem, PendingAction
 from app.security import RequireApiKey
-from app.services import llm_provider, pending_actions, temp_files
+from app.services import llm_provider, pending_actions, retrieval, temp_files
 from app.services import study_sheet as sheets
 from app.services.llm_provider import ProviderError
 from app.services.illustrations import generate_illustration_async
@@ -146,7 +146,7 @@ async def _study_sheet_response(result: dict, request: ChatRequest, request_id: 
     return ChatResponse(
         answer=sheets.ready_message(ttl_minutes, rendered.pages),
         sources=sources,
-        retrieved_chunks=len(matches),
+        retrieved_chunks=retrieval.chunk_count(matches),
         retrieved_contexts=[match["text"] for match in matches],
         download=DownloadItem(file_id=stored.file_id, filename=stored.filename,
                               content_type=stored.content_type, expires_at=stored.expires_at,
@@ -266,7 +266,7 @@ async def ask(request: ChatRequest, http_request: Request):
         return ChatResponse(
             answer=answer,
             sources=result["sources"],
-            retrieved_chunks=len(matches),
+            retrieved_chunks=retrieval.chunk_count(matches),
             retrieved_contexts=[match["text"] for match in matches],
             illustration_url=illustration_url,
         )

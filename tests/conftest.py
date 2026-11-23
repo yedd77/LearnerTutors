@@ -50,6 +50,10 @@ os.environ.update({
     "LANGSMITH_TRACING": "false",
     "LANGCHAIN_TRACING_V2": "false",
     "TOP_K": "5",
+    # Reranking (an extra LLM call) and neighbour expansion are tested explicitly
+    # in test_retrieval_pipeline.py; elsewhere they would only blur chunk counts.
+    "RAG_RERANK": "false",
+    "RETRIEVAL_NEIGHBOUR_HITS": "0",
     # Real embedding distances are model-specific; the fake embeddings are not calibrated.
     "RETRIEVAL_MAX_DISTANCE": "0",
     "CHUNK_SIZE": "900",

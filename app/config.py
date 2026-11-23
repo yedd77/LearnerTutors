@@ -94,7 +94,19 @@ class Settings(BaseSettings):
 
     chroma_path: str = "./storage/chroma"
     chroma_collection: str = "ragassistant_chunks"
-    top_k: int = 5
+    # Passages given to the model per question (tools may override, see prompt_registry).
+    top_k: int = 6
+    # Hybrid retrieval: candidates fetched per query (dense and keyword each) before
+    # fusion, reranking and the cut to top_k; capped at 50.
+    retrieval_candidates: int = 20
+    # The best N passages are merged with their neighbouring chunks.
+    retrieval_neighbour_hits: int = 3
+    # One LLM call reorders the candidates when more than top_k pass the
+    # relevance threshold. Fails open to the fused order.
+    rag_rerank: bool = True
+    # /summarize and /studyguide read a whole document (or section) in order
+    # when it fits in this many characters.
+    summary_context_chars: int = 24000
     # Drop retrieved chunks whose cosine distance is above this value, so off-topic
     # questions get the no-context reply. Unset = use the calibrated default for the
     # active embedding model (see CALIBRATED_MAX_DISTANCE); 0 = disabled.
@@ -149,6 +161,13 @@ class Settings(BaseSettings):
         return CALIBRATED_MAX_DISTANCE.get(key, 0.0)
 
     @property
+    def relevance_filter_status(self) -> str:
+        """``override`` (RETRIEVAL_MAX_DISTANCE set), ``calibrated`` or ``off``."""
+        if self.retrieval_max_distance is not None:
+            return "override" if self.retrieval_max_distance > 0 else "off"
+        return "calibrated" if self.resolved_retrieval_max_distance > 0 else "off"
+
+    @property
     def resolved_embedding_model(self) -> str:
         """``EMBEDDING_MODEL`` if set, otherwise the provider's default embedding model."""
         if self.embedding_model.strip():
@@ -166,10 +185,15 @@ class Settings(BaseSettings):
 
         Chroma keeps one collection per identity, and a change requires re-indexing.
         Only Gemini has a configurable output dimension, so only it is tagged.
+        Ollama nomic models get task prefixes (see embedding_provider), which
+        changes their vectors, so they are tagged too.
         """
         provider = self.embedding_provider.lower()
+        model = self.resolved_embedding_model
         dimension_tag = str(self.gemini_embed_dimensions) if provider == "gemini" else "default"
-        return f"{provider}:{self.resolved_embedding_model}:{dimension_tag}"
+        if provider == "ollama" and "nomic-embed" in model.lower():
+            dimension_tag += "+prefixed"
+        return f"{provider}:{model}:{dimension_tag}"
 
 
 _TRACING_ENV_VARS = ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2")

@@ -84,7 +84,9 @@ def enough_material(matches: list[dict], settings: Settings | None = None) -> bo
     """Deterministic minimum before any LLM call: enough relevant chunks and text."""
     settings = settings or get_settings()
     chars = sum(len(match.get("text", "")) for match in matches)
-    return (len(matches) >= max(1, settings.notes_min_chunks)
+    # Merged passages (neighbour expansion) count every chunk they contain.
+    chunks = sum(int(match.get("chunk_count", 1)) for match in matches)
+    return (chunks >= max(1, settings.notes_min_chunks)
             and chars >= max(0, settings.notes_min_context_chars))
 
 

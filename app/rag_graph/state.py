@@ -17,6 +17,7 @@ class RagState(TypedDict, total=False):
     intent: Literal["conversational", "course_question"]
     classified_by: str            # router | heuristic | llm | fallback
     search_query: str             # text used for retrieval only, never for generation
+    search_queries: list[str]     # search_query plus up to 2 sub-queries for multi-part questions
     attempts: int                 # retrieval attempts made so far
     retrieved_raw: int            # chunks returned by the last search, before grading
     matches: list[dict[str, Any]]

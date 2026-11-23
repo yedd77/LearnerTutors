@@ -67,15 +67,16 @@ def sheet_llm(monkeypatch):
 
 @pytest.fixture
 def searches(monkeypatch):
-    """Record search_course calls while running the real search."""
+    """Record hybrid_search queries while running the real search."""
     calls: list[dict] = []
-    real = vector_store.search_course
+    real = vector_store.hybrid_search
 
-    def spy(question, course_id, include_course_documents, top_k):
-        calls.append({"query": question, "course_id": course_id, "top_k": top_k})
-        return real(question, course_id, include_course_documents, top_k)
+    def spy(queries, course_id, include_course_documents, top_k):
+        for query in queries:
+            calls.append({"query": query, "course_id": course_id, "top_k": top_k})
+        return real(queries, course_id, include_course_documents, top_k)
 
-    monkeypatch.setattr(vector_store, "search_course", spy)
+    monkeypatch.setattr(vector_store, "hybrid_search", spy)
     return calls
 
 

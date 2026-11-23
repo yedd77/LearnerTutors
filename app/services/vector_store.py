@@ -1,17 +1,23 @@
 """ChromaDB storage: one collection per embedding model, course-scoped search.
 
 Every chunk stores ``document_id``, ``filename``, ``course_id``, ``owner_id``,
-``visibility`` ("course"), ``retrieval_enabled`` and ``page``. Search always
-filters on course, retrieval flag and visibility.
+``visibility`` ("course"), ``retrieval_enabled``, ``page``, ``heading`` and
+``chunk_index`` (its position in the document; absent on chunks indexed before
+it existed). Chunks are embedded with their document title and heading in
+front, so short chunks still carry their topic. Search always filters on
+course, retrieval flag and visibility.
 """
 import hashlib
 import logging
+import math
+from pathlib import Path
 import re
 import threading
 import time
 from typing import Optional
 import chromadb
 from app.config import get_settings
+from app.services import keyword_index
 from app.services.embedding_provider import embed_texts
 
 _client = None
@@ -29,6 +35,7 @@ def reset_vector_store_cache() -> None:
         _collection = None
         _collection_identity = None
         _retrieval_metadata_migrated = False
+    keyword_index.invalidate_course()
 
 
 
@@ -141,6 +148,18 @@ def _chunk_id(document_id: str, index: int, text: str) -> str:
 
     return f"{document_id}_{index}_{digest}"
 
+def _document_title(filename: str) -> str:
+    """A readable title from a file name: ``week_3-pharmacogenomics.pdf`` -> ``week 3 pharmacogenomics``."""
+    return " ".join(re.split(r"[_\-\s]+", Path(filename).stem)).strip()
+
+
+def _embedding_text(filename: str, heading: str, text: str) -> str:
+    """Contextual text that is embedded for a chunk (the stored text stays plain)."""
+    lines = [f"Document: {_document_title(filename)}"]
+    if heading:
+        lines.append(f"Section: {heading}")
+    return "\n".join(lines) + "\n\n" + text
+
 # Visibility stored on every chunk. Personal (student-owned) uploads were removed, so
 # course-wide documents are the only kind that can be indexed or retrieved.
 COURSE_VISIBILITY = "course"
@@ -199,7 +218,10 @@ def index_document(
         # paying a full network round-trip for multiple small Chroma writes.
         for offset in range(0, len(chunks), 100):
             batch = chunks[offset:offset + 100]
-            vectors = embed_texts([chunk["text"] for chunk in batch], task_type="RETRIEVAL_DOCUMENT")
+            vectors = embed_texts(
+                [_embedding_text(filename, chunk.get("heading") or "", chunk["text"]) for chunk in batch],
+                task_type="RETRIEVAL_DOCUMENT",
+            )
 
             ids = []
             metadatas = []
@@ -221,6 +243,8 @@ def index_document(
                         if chunk.get("page")
                         else -1
                     ),
+                    "heading": str(chunk.get("heading") or "")[:200],
+                    "chunk_index": int(chunk.get("chunk_index", i)),
                 })
 
             collection.add(
@@ -234,6 +258,8 @@ def index_document(
     except Exception:
         collection.delete(where=where)
         raise
+    finally:
+        keyword_index.invalidate_course(course_id)
 
     return total
 
@@ -269,6 +295,7 @@ def set_document_retrieval(
                 for m in metadatas[start:start + step]
             ],
         )
+    keyword_index.invalidate_course(course_id)
 
     return len(ids)
 
@@ -353,6 +380,7 @@ def delete_document(document_id: str, course_id: int) -> int:
 
     if ids:
         collection.delete(ids=ids)
+    keyword_index.invalidate_course(course_id)
 
     return len(ids)
 
@@ -422,3 +450,255 @@ def search_course(
         })
 
     return rows
+
+
+# --------------------------------------------------------------------------- hybrid retrieval
+# Reciprocal rank fusion constant (the usual 60): fuses ranked lists without
+# having to make BM25 scores and cosine distances comparable.
+RRF_K = 60
+# Two chunks whose word sets overlap at least this much are duplicates (e.g. the
+# same file uploaded twice, or repeated slide headers); only the better one is kept.
+DUPLICATE_JACCARD = 0.8
+MAX_QUERIES = 3
+MAX_CANDIDATES = 50
+
+
+def _course_where(course_id: int, *extra: dict) -> dict:
+    """The access filter every retrieval read uses, plus optional extra clauses."""
+    return {"$and": [
+        {"course_id": int(course_id)},
+        {"retrieval_enabled": True},
+        {"visibility": COURSE_VISIBILITY},
+        *extra,
+    ]}
+
+
+def _cosine_distance(a, b) -> float:
+    """Cosine distance (1 - cosine similarity), the metric of the Chroma collection."""
+    dot = norm_a = norm_b = 0.0
+    for x, y in zip(a, b):
+        x, y = float(x), float(y)
+        dot += x * y
+        norm_a += x * x
+        norm_b += y * y
+    if not norm_a or not norm_b:
+        return 1.0
+    return 1.0 - dot / math.sqrt(norm_a * norm_b)
+
+
+def _keyword_text(document: str, metadata: dict) -> str:
+    """What BM25 indexes: file title, heading and chunk text."""
+    return " ".join(filter(None, (
+        _document_title(str(metadata.get("filename", ""))), str(metadata.get("heading", "")), document,
+    )))
+
+
+def _load_course_corpus(collection, course_id: int) -> tuple[list[str], list[str]]:
+    """All searchable chunks of a course, for the keyword index (paged reads)."""
+    ids: list[str] = []
+    texts: list[str] = []
+    offset = 0
+    while True:
+        result = collection.get(where=_course_where(course_id), limit=2000, offset=offset,
+                                include=["documents", "metadatas"])
+        batch = result.get("ids", [])
+        if not batch:
+            break
+        for chunk_id, document, metadata in zip(batch, result.get("documents") or [],
+                                                result.get("metadatas") or []):
+            ids.append(chunk_id)
+            texts.append(_keyword_text(document or "", metadata or {}))
+        offset += len(batch)
+    return ids, texts
+
+
+def _word_set(text: str) -> set[str]:
+    return set(re.findall(r"\w+", text.lower()))
+
+
+def hybrid_search(
+    queries: list[str],
+    course_id: int,
+    include_course_documents: bool,
+    top_k: int,
+) -> list[dict]:
+    """Dense + BM25 search over the user's course, fused with reciprocal rank fusion.
+
+    Each of up to 3 queries (the search query plus sub-queries) runs a dense and
+    a keyword search for a candidate pool of ``max(RETRIEVAL_CANDIDATES, 2*top_k)``
+    (at most 50). Results are fused, near-duplicates are dropped, and every
+    candidate gets ``distance`` = its smallest cosine distance to any query, so
+    the relevance threshold applies to keyword hits too. Returns the pool,
+    best first; the caller narrows it to ``top_k``.
+
+    Rows are ``{"chunk_id", "text", "metadata", "distance", "score"}``. Every row
+    is read from Chroma with the course/retrieval/visibility filter: keyword
+    ranking alone never makes a chunk visible.
+    """
+    if not include_course_documents:
+        return []
+    queries = list(dict.fromkeys(q.strip() for q in queries if q and q.strip()))[:MAX_QUERIES]
+    if not queries:
+        return []
+    settings = get_settings()
+    pool = max(1, min(MAX_CANDIDATES, max(settings.retrieval_candidates, 2 * top_k)))
+    collection = get_collection()
+    where = _course_where(course_id)
+
+    started = time.perf_counter()
+    query_vectors = embed_texts(queries, task_type="RETRIEVAL_QUERY")
+    keyword = keyword_index.get_course_index(
+        settings.embedding_identity, course_id,
+        lambda: _load_course_corpus(collection, course_id),
+    )
+
+    scores: dict[str, float] = {}
+    rows: dict[str, dict] = {}
+    for query, vector in zip(queries, query_vectors):
+        result = collection.query(query_embeddings=[vector], n_results=pool, where=where,
+                                  include=["documents", "metadatas", "embeddings"])
+        dense_ids = result["ids"][0]
+        documents = result["documents"][0]
+        metadatas = result["metadatas"][0]
+        embeddings = result["embeddings"][0] if result.get("embeddings") is not None else []
+        for rank, chunk_id in enumerate(dense_ids, 1):
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (RRF_K + rank)
+            if chunk_id not in rows:
+                rows[chunk_id] = {"chunk_id": chunk_id, "text": documents[rank - 1],
+                                  "metadata": metadatas[rank - 1] or {},
+                                  "embedding": embeddings[rank - 1]}
+        for rank, (chunk_id, _) in enumerate(keyword.search(query, pool), 1):
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (RRF_K + rank)
+
+    ranked = sorted(scores, key=scores.get, reverse=True)[:pool]
+    missing = [chunk_id for chunk_id in ranked if chunk_id not in rows]
+    if missing:
+        # Keyword-only hits: re-read with the access filter (drops anything stale).
+        fetched = collection.get(ids=missing, where=where,
+                                 include=["documents", "metadatas", "embeddings"])
+        for i, chunk_id in enumerate(fetched.get("ids", [])):
+            rows[chunk_id] = {"chunk_id": chunk_id, "text": fetched["documents"][i],
+                              "metadata": fetched["metadatas"][i] or {},
+                              "embedding": fetched["embeddings"][i]}
+
+    results: list[dict] = []
+    kept_words: list[set[str]] = []
+    for chunk_id in ranked:
+        row = rows.get(chunk_id)
+        if row is None:
+            continue
+        words = _word_set(row["text"])
+        if any(words and len(words & other) / len(words | other) >= DUPLICATE_JACCARD
+               for other in kept_words):
+            continue
+        kept_words.append(words)
+        embedding = row.pop("embedding")
+        row["distance"] = (min(_cosine_distance(vector, embedding) for vector in query_vectors)
+                           if embedding is not None and len(embedding) else None)
+        row["score"] = scores[chunk_id]
+        results.append(row)
+    logger.info(
+        "Hybrid retrieval finished course=%s queries=%s candidates=%s keyword_hits=%s duration_ms=%.2f",
+        course_id, len(queries), len(results), len(missing),
+        (time.perf_counter() - started) * 1000,
+    )
+    return results
+
+
+def merge_chunk_texts(first: str, second: str) -> str:
+    """Join consecutive chunks, dropping the sentence overlap they share."""
+    longest = min(len(first), len(second), 1000)
+    for size in range(longest, 9, -1):
+        # Only a whole-word overlap counts, so a coincidental suffix is not merged.
+        at_boundary = size == len(first) or first[-size - 1].isspace()
+        if at_boundary and first.endswith(second[:size]):
+            return first + second[size:]
+    return first + "\n" + second
+
+
+def _chunk_index(row: dict) -> int | None:
+    value = row["metadata"].get("chunk_index")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _fetch_chunks(course_id: int, document_id: str, *extra: dict) -> list[dict]:
+    """Searchable chunks of one document (access filter applied), in document order."""
+    result = get_collection().get(
+        where=_course_where(course_id, {"document_id": str(document_id)}, *extra),
+        include=["documents", "metadatas"],
+    )
+    rows = [{"chunk_id": chunk_id, "text": document, "metadata": metadata or {}}
+            for chunk_id, document, metadata in zip(result.get("ids", []),
+                                                    result.get("documents") or [],
+                                                    result.get("metadatas") or [])]
+    rows = [row for row in rows if _chunk_index(row) is not None]
+    return sorted(rows, key=_chunk_index)
+
+
+def expand_with_neighbours(matches: list[dict], course_id: int, neighbour_hits: int) -> list[dict]:
+    """Merge each hit with its adjacent chunks so the model sees whole explanations.
+
+    The top ``neighbour_hits`` hits also pull in chunk ``index-1`` and ``index+1``
+    of the same document; hits that are adjacent to each other are merged into
+    one passage. A passage keeps the metadata, citation page and score of its
+    best-ranked hit, and ``chunk_count`` says how many chunks it contains.
+    Chunks indexed before ``chunk_index`` existed are left as is.
+    """
+    wanted: dict[str, set[int]] = {}
+    for position, match in enumerate(matches):
+        index = _chunk_index(match)
+        if index is None:
+            continue
+        document_id = str(match["metadata"].get("document_id"))
+        indexes = wanted.setdefault(document_id, set())
+        indexes.add(index)
+        if position < neighbour_hits:
+            indexes.update({index - 1, index + 1})
+    if not wanted:
+        return matches
+
+    texts: dict[tuple[str, int], str] = {}
+    for document_id, indexes in wanted.items():
+        needed = sorted(i for i in indexes if i >= 0)
+        for row in _fetch_chunks(course_id, document_id, {"chunk_index": {"$in": needed}}):
+            texts[(document_id, _chunk_index(row))] = row["text"]
+
+    runs: dict[tuple[str, int], tuple[int, ...]] = {}
+    for document_id in wanted:
+        present = sorted(i for (doc, i) in texts if doc == document_id)
+        run: list[int] = []
+        for index in present + [None]:
+            if run and (index is None or index != run[-1] + 1):
+                for member in run:
+                    runs[(document_id, member)] = tuple(run)
+                run = []
+            if index is not None:
+                run.append(index)
+
+    expanded: list[dict] = []
+    emitted: set[tuple[str, tuple[int, ...]]] = set()
+    for match in matches:
+        index = _chunk_index(match)
+        document_id = str(match["metadata"].get("document_id"))
+        run = runs.get((document_id, index)) if index is not None else None
+        if run is None:
+            expanded.append(match)
+            continue
+        if (document_id, run) in emitted:
+            continue                     # already merged into a better-ranked passage
+        emitted.add((document_id, run))
+        text = texts[(document_id, run[0])]
+        for member in run[1:]:
+            text = merge_chunk_texts(text, texts[(document_id, member)])
+        expanded.append({**match, "text": text, "chunk_count": len(run)})
+    return expanded
+
+
+def ordered_document_chunks(document_id: str, course_id: int,
+                            heading: str | None = None) -> list[dict]:
+    """A document's searchable chunks in reading order, optionally one heading only.
+
+    Used for summaries and study guides of a whole document or section.
+    """
+    extra = ({"heading": heading},) if heading else ()
+    return _fetch_chunks(course_id, document_id, *extra)

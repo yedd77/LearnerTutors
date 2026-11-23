@@ -4,7 +4,7 @@ FastAPI backend for a Moodle RAG (Retrieval-Augmented Generation) assistant. It 
 
 - **FastAPI** for the HTTP API, authenticated with a shared key from the Moodle plugin.
 - **OpenAI, Gemini or Ollama** for chat generation through LangChain chat models. Moodle chooses the provider and model on every request.
-- **LangGraph** to orchestrate each chat request: classify, rewrite, retrieve, grade, then generate.
+- **LangGraph** to orchestrate each chat request: classify, rewrite, retrieve (hybrid dense + keyword), grade, refine (rerank, neighbours), then generate.
 - A separately configured **embedding provider/model** for indexing and retrieval (direct HTTP/SDK calls).
 - **ChromaDB** for persistent vector storage, with one collection per embedding model.
 - **Pydantic Settings** for `.env` configuration, plus an encrypted runtime config that Moodle writes.
@@ -35,7 +35,7 @@ LearnerTutors/
 |   |   |-- context.py          RagContext: immutable per-request access scope + model
 |   |   |-- state.py            RagState: graph state (no access-scope fields)
 |   |   |-- nodes.py            classify, conversational_reply, rewrite_query, retrieve,
-|   |   |                       grade, generate, validate, no_context, finalize
+|   |   |                       grade, refine, generate, validate, no_context, finalize
 |   |   `-- graph.py            StateGraph wiring and run_rag_graph()
 |   |
 |   |-- prompts/
@@ -45,15 +45,16 @@ LearnerTutors/
 |   |   `-- graph/              classify.md, rewrite.md, conversational.md
 |   |
 |   `-- services/
-|       |-- chunker.py          Overlapping character-window chunking
+|       |-- chunker.py          Sentence-aligned overlapping chunks with heading and position
 |       |-- configuration_check.py  Live provider checks for POST /admin/test-configuration
-|       |-- document_parser.py  PDF/DOCX/PPTX/TXT/MD text extraction
+|       |-- document_parser.py  PDF/DOCX/PPTX/TXT/MD text extraction, with headings
+|       |-- keyword_index.py    Per-course BM25 keyword ranking for hybrid search
 |       |-- embedding_provider.py  Embeddings via OpenAI, Gemini or Ollama
 |       |-- illustrations.py    /explain image generation (OpenAI or Gemini) and signed URLs
 |       |-- llm_provider.py     The only chat-generation abstraction (LangChain models)
 |       |-- retrieval.py        Retrieval thread pool, relevance filter, context/source building
 |       |-- suggestion_generator.py  Starter-question suggestions for documents
-|       `-- vector_store.py     ChromaDB collection, indexing, course-scoped search
+|       `-- vector_store.py     ChromaDB collection, indexing, course-scoped hybrid search
 |
 |-- docs/PROVIDER_CREDENTIALS.md  How Moodle stores and syncs provider keys
 |-- eval/                       RAGAS pipeline (generate_dataset, run_rag_response, run_evaluation)
@@ -150,7 +151,7 @@ A chat request may also carry an optional `fallback_provider` + `fallback_model`
 START → classify ─conversational─► conversational_reply ───────────────────► finalize → END
             │ course_question
             ▼
-        rewrite_query ─► retrieve ─► grade ─relevant─► generate ─► validate ─► finalize
+        rewrite_query ─► retrieve ─► grade ─relevant─► refine ─► generate ─► validate ─► finalize
             ▲    │ same query as before   │ poor, retry allowed
             │    └───────────────────────────────────► no_context ──────────► finalize
             └─────────────────────────┘ poor, exhausted ─► no_context
@@ -162,17 +163,23 @@ START → classify ─conversational─► conversational_reply ─────�
   - Only short, ambiguous messages go to an LLM classifier. If classification fails, the message is treated as a course question.
 - **conversational_reply:** a short reply from `prompts/graph/conversational.md`, which refuses academic content. There is no retrieval and no sources.
 - **rewrite_query:**
-  - First turns are not rewritten. Follow-ups with history are condensed into a standalone query, and retries are rewritten with different wording.
+  - Simple first turns are not rewritten. Follow-ups with history are condensed into a standalone query, and retries are rewritten with different wording.
+  - Multi-part questions (`is_compound`: "…, and how …", or two question marks) are rewritten too, into a main query plus up to 2 `sub_queries`.
   - The rewritten text is used only for search. Generation always uses the original question.
-- **retrieve:** calls `vector_store.search_course` on the retrieval thread pool, using the scope from `RagContext`.
+- **retrieve:** calls `vector_store.hybrid_search` on the retrieval thread pool, using the scope from `RagContext`. Each query runs a dense search and a BM25 keyword search (`keyword_index.py`) for a candidate pool (`RETRIEVAL_CANDIDATES`, at least 2 × top_k, max 50). The lists are fused with reciprocal rank fusion, near-duplicates are dropped, and every candidate gets its smallest cosine distance to any query, so the relevance threshold also applies to keyword hits. Keyword ranking only orders chunk IDs: every chunk is read back from Chroma with the course, retrieval and visibility filter.
 - **grade:**
   - Drops chunks above the relevance threshold.
   - Retries only if chunks existed but none were close enough, up to `RAG_MAX_RETRIEVAL_ATTEMPTS` (max 3).
-- **generate:** builds the numbered `[S1..Sn]` passages and sources (`services/retrieval.py`), then calls `generate_answer_async`.
+- **refine:**
+  - When more than top_k candidates pass the threshold, one LLM call (`prompts/graph/rerank.md`) orders them (`RAG_RERANK`, on by default). The model can only reorder the passages it was shown. Any failure keeps the fused order.
+  - Keeps the best top_k.
+  - `/summarize` and `/studyguide`: when at least half the hits come from one document (and heading), that document or section is read in order, one passage per page, if it fits in `SUMMARY_CONTEXT_CHARS`.
+  - Otherwise the best `RETRIEVAL_NEIGHBOUR_HITS` hits are merged with their neighbouring chunks, and adjacent hits are merged into one passage. A merged passage carries `chunk_count`; `retrieved_chunks` and the `/notes` sufficiency check count chunks, not passages.
+- **generate:** builds the numbered `[S1..Sn]` passages (with file, page and section) and sources (`services/retrieval.py`), then calls `generate_answer_async`.
 - **validate:** a pass-through hook for a future grounding validator.
 - **no_context:** returns the standard "I couldn't find relevant text…" message.
 
-Each node logs `rag_graph.node.finish`. Every request ends with `rag_graph.finish … outcome= path= attempts= llm_calls=`. A clear first-turn question makes no extra LLM calls; the worst case is 1 classify plus 2 rewrites.
+Each node logs `rag_graph.node.finish`. Every request ends with `rag_graph.finish … outcome= path= attempts= llm_calls=`. A clear, single-part first-turn question with at most top_k relevant candidates makes no extra LLM calls; the worst case is 1 classify, 3 rewrites and 1 rerank.
 
 ## Prompt system
 
@@ -195,13 +202,14 @@ Each node logs `rag_graph.node.finish`. Every request ends with `rag_graph.finis
   - PPTX via python-pptx;
   - TXT and MD as UTF-8.
 
-  Scanned PDFs need OCR, which isn't included.
-- **`chunker.py`** creates overlapping character windows (`CHUNK_SIZE`/`CHUNK_OVERLAP`) and keeps each chunk's page number.
+  Sections carry a `heading` when the document has one: PDF lines at least 1.2 × the body font size, DOCX Heading/Title styles, the PPTX slide title, Markdown `#` lines. Scanned PDFs need OCR, which isn't included.
+- **`chunker.py`** packs paragraphs and sentences into chunks of up to `CHUNK_SIZE` characters. Consecutive chunks repeat whole sentences of up to `CHUNK_OVERLAP` characters. Each chunk keeps its page and heading, and gets a document-wide `chunk_index`.
 - **`embedding_provider.py`** produces embeddings through OpenAI, Gemini or Ollama. The provider/model comes from Moodle when it sets one, otherwise from `.env` (`EMBEDDING_PROVIDER`/`EMBEDDING_MODEL`). The key is the chat key when `embedding_reuse_chat_api_key` is on; otherwise the Moodle embedding key, then the chat key. `embed_texts(..., settings=)` accepts unsaved settings for the configuration test.
 - **`vector_store.py`:**
   - opens the Chroma collection for the active embedding model, named `<prefix>_<provider>_<model>_<hash>`, and reopens it in every worker when the embedding identity changes;
-  - indexes and replaces documents;
-  - searches with course scoping;
+  - indexes and replaces documents, storing `heading` and `chunk_index` and embedding each chunk as `Document: <title>\nSection: <heading>\n\n<text>` (the stored text stays plain);
+  - searches with course scoping: `search_course` (dense only) and `hybrid_search` (dense + keyword);
+  - `expand_with_neighbours` and `ordered_document_chunks`, both through the same access filter;
   - deletes documents and toggles retrieval;
   - migrates legacy metadata;
   - reports retrieval status.
@@ -210,6 +218,7 @@ Each node logs `rag_graph.node.finish`. Every request ends with `rag_graph.finis
   - `enabled_only`;
   - `filter_by_relevance` (logs `chat.retrieval.filtered`);
   - `build_context_and_sources`;
+  - `document_scope` / `document_passages` (whole-document reading for summaries) and `chunk_count`;
   - `NO_CONTEXT_ANSWER`.
 - **`suggestion_generator.py`** produces three document-grounded starter questions via `generate_structured_sync`, with a deterministic fallback.
 - **`illustrations.py`** generates `/explain` images with the Moodle-selected image provider. Images are stored under `storage/illustrations/` and served via signed URLs.
@@ -221,8 +230,8 @@ Each node logs `rag_graph.node.finish`. Every request ends with `rag_graph.finis
 ```text
 Moodle upload (POST /api/v1/documents/index)
     -> documents.py            validate type/size, visibility=course
-    -> document_parser.py      text per page/slide
-    -> chunker.py              overlapping chunks
+    -> document_parser.py      text per page/slide, with headings
+    -> chunker.py              sentence-aligned overlapping chunks (heading, chunk_index)
     -> vector_store.py         embedding_provider.embed_texts() → Chroma collection for the
                                active embedding model (replaces any previous chunks of the document)
     -> suggestion_generator.py (optional) three starter questions
@@ -234,8 +243,9 @@ Moodle upload (POST /api/v1/documents/index)
 Moodle chat (POST /api/v1/chat, provider + model from Moodle)
     -> chat.py                 prompt_router → RagContext(course, user, include flag, provider, model)
     -> rag_graph               classify → [conversational_reply]
-                               or rewrite_query → retrieve (vector_store.search_course,
-                               embedding_provider) → grade (relevance threshold, ≤ 3 attempts)
+                               or rewrite_query (+ sub-queries) → retrieve (vector_store.hybrid_search:
+                               dense + BM25, RRF) → grade (relevance threshold, ≤ 3 attempts)
+                               → refine (rerank, top_k, neighbours / whole document)
                                → generate (prompt_builder + llm_provider) | no_context
     -> chat.py                 optional /explain illustration
     -> ChatResponse            answer, sources, retrieved_chunks, retrieved_contexts

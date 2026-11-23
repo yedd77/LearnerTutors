@@ -49,7 +49,10 @@ def make_pptx(slides: list[str]) -> bytes:
 @pytest.mark.parametrize("name", ["notes.txt", "notes.md", "NOTES.TXT"])
 def test_text_and_markdown(name):
     sections = extract_sections(name, "# Title\n\nHello café".encode("utf-8"))
-    assert sections == [{"page": None, "text": "# Title\n\nHello café"}]
+    expected = {"page": None, "text": "# Title\n\nHello café"}
+    if name.lower().endswith(".md"):
+        expected["heading"] = "Title"     # Markdown headings are kept for chunk context
+    assert sections == [expected]
 
 
 def test_utf8_bom_is_removed():

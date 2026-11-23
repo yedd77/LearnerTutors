@@ -63,10 +63,11 @@ def test_missing_page_is_reported_as_not_available(client, auth, stub_generation
 
 
 def test_sources_are_deduplicated_by_document_and_page(client, auth, stub_generation):
+    # Non-adjacent chunk positions, so the passages are not merged as neighbours.
     vs.index_document("multi", "multi.txt", 1, 10, [
-        {"page": 1, "text": "photosynthesis first chunk"},
-        {"page": 1, "text": "photosynthesis second chunk"},
-        {"page": 2, "text": "photosynthesis third chunk"},
+        {"page": 1, "text": "photosynthesis first chunk", "chunk_index": 0},
+        {"page": 1, "text": "photosynthesis second chunk", "chunk_index": 5},
+        {"page": 2, "text": "photosynthesis third chunk", "chunk_index": 10},
     ])
     body = ask(client, auth).json()
     assert body["retrieved_chunks"] == 3
@@ -84,7 +85,8 @@ def test_excerpt_is_truncated(client, auth, stub_generation):
 
 def test_tool_specific_top_k(client, auth, stub_generation):
     vs.index_document("many", "many.txt", 1, 10,
-                      [{"page": 1, "text": f"photosynthesis item {i}"} for i in range(12)])
+                      [{"page": 1, "text": f"photosynthesis item {i}", "chunk_index": i * 3}
+                       for i in range(12)])
     assert ask(client, auth).json()["retrieved_chunks"] == 5  # default TOP_K
     assert ask(client, auth, "/exam photosynthesis").json()["retrieved_chunks"] == 10  # exam tool top_k
 

@@ -221,6 +221,8 @@ def read_config():
 
     ``embedding_source`` is ``moodle`` when Moodle overrides the embedding
     provider/model, otherwise ``env``.
+    ``relevance_filter`` is ``calibrated``, ``override`` or ``off`` (no
+    calibrated threshold for the active embedding model).
     """
     settings = get_settings()
     return {
@@ -235,6 +237,10 @@ def read_config():
         "resolved_embedding_model": settings.resolved_embedding_model,
         "gemini_embed_dimensions": settings.gemini_embed_dimensions,
         "embedding_source": _embedding_source(_read_runtime_file()),
+        # "off" means off-topic questions are not filtered for this embedding model
+        # (uncalibrated); see CALIBRATED_MAX_DISTANCE and eval/calibrate_threshold.py.
+        "relevance_filter": settings.relevance_filter_status,
+        "relevance_threshold": settings.resolved_retrieval_max_distance,
         **_key_status(settings),
     }
 

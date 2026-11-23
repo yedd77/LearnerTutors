@@ -33,8 +33,32 @@ class Intent(BaseModel):
 
 
 class SearchQuery(BaseModel):
-    """Query-rewrite output schema."""
+    """Query-rewrite output schema: the main query plus sub-queries for multi-part questions."""
     query: str = Field(min_length=1, max_length=500)
+    sub_queries: list[str] = Field(default_factory=list)
+
+
+class Ranking(BaseModel):
+    """Rerank output schema: 1-based passage numbers, most useful first."""
+    ranking: list[int] = Field(default_factory=list)
+
+
+# Tools that read a whole document/section in order when the hits point to one.
+DOCUMENT_LEVEL_TOOLS = frozenset({"summarization", "study_guide"})
+MAX_SUB_QUERIES = 2
+RERANK_EXCERPT_CHARS = 600
+
+# Two questions in one message: "..., and how does ...?", "...? What ...?"
+_COMPOUND = re.compile(
+    r"\b(?:and|also|as well as|plus)\s+(?:how|what|why|when|where|which|who|whether|does|do|is|are"
+    r"|can|list|explain|describe|compare)\b|\?\s*\S.*\?",
+    re.IGNORECASE,
+)
+
+
+def is_compound(question: str) -> bool:
+    """True when a message likely asks about more than one thing."""
+    return bool(_COMPOUND.search(question))
 
 
 def max_attempts(settings: Settings) -> int:
@@ -140,16 +164,17 @@ async def conversational_reply(state: RagState, runtime: Runtime[RagContext]) ->
 async def rewrite_query(state: RagState, runtime: Runtime[RagContext]) -> dict:
     """Choose the search text for this attempt.
 
-    The first turn uses the question as-is; follow-ups are condensed with the
-    history and retries are reworded by the LLM. The result is used only for
-    search, never for generation.
+    A simple first turn uses the question as-is. Follow-ups are condensed with
+    the history, retries are reworded, and multi-part questions are split into
+    up to 3 searches, all by the LLM. The result is used only for search,
+    never for generation.
     """
     question = state["question"]
     attempts = state.get("attempts", 0)
     history = state.get("history", [])
-    # First turns need no rewrite.
-    if attempts == 0 and not history:
-        return {"search_query": question, "next_step": "retrieve"}
+    # Simple first turns need no rewrite.
+    if attempts == 0 and not history and not is_compound(question):
+        return {"search_query": question, "search_queries": [question], "next_step": "retrieve"}
 
     ctx = runtime.context
     retry_note = ""
@@ -166,13 +191,15 @@ async def rewrite_query(state: RagState, runtime: Runtime[RagContext]) -> dict:
             fallback=ctx.fallback,
         )
         query = " ".join(result.query.split())[:500] or question
+        sub_queries = [" ".join(q.split())[:500] for q in result.sub_queries if q and q.strip()]
     except Exception as exc:
         logger.warning("rag_graph.rewrite.fallback id=%s error=%s", ctx.request_id, exc)
-        query = question
+        query, sub_queries = question, []
+    queries = list(dict.fromkeys([query, *sub_queries[:MAX_SUB_QUERIES]]))
     # A retry with the same text would return the same chunks: stop instead.
     repeated = attempts > 0 and query.casefold() == state.get("search_query", "").casefold()
-    return {"search_query": query, "next_step": "no_context" if repeated else "retrieve",
-            "llm_calls": 1}
+    return {"search_query": query, "search_queries": queries,
+            "next_step": "no_context" if repeated else "retrieve", "llm_calls": 1}
 
 
 def after_rewrite(state: RagState) -> str:
@@ -180,23 +207,29 @@ def after_rewrite(state: RagState) -> str:
     return state["next_step"]
 
 
-async def retrieve(state: RagState, runtime: Runtime[RagContext]) -> dict:
-    """Search the course with the current query; the scope comes only from runtime.context."""
-    ctx = runtime.context
-    settings = get_settings()
-    top_k = state["route"].tool.top_k or settings.top_k
+def final_top_k(state: RagState, settings: Settings) -> int:
+    """Passages that reach the model: the tool's top_k, or the widened /notes value."""
     if state.get("expanded"):
         # Approved wider /notes search: more chunks, still only this course.
-        top_k = sheets.expanded_top_k(settings)
+        return sheets.expanded_top_k(settings)
+    return state["route"].tool.top_k or settings.top_k
+
+
+async def retrieve(state: RagState, runtime: Runtime[RagContext]) -> dict:
+    """Hybrid-search the course with the current queries; the scope comes only from runtime.context."""
+    ctx = runtime.context
+    settings = get_settings()
+    top_k = final_top_k(state, settings)
+    queries = state.get("search_queries") or [state["search_query"]]
     started = time.perf_counter()
-    chat_logger.info("chat.retrieval.start id=%s course=%s top_k=%s attempt=%s expanded=%s",
-                     ctx.request_id, ctx.course_id, top_k, state.get("attempts", 0) + 1,
+    chat_logger.info("chat.retrieval.start id=%s course=%s top_k=%s queries=%s attempt=%s expanded=%s",
+                     ctx.request_id, ctx.course_id, top_k, len(queries), state.get("attempts", 0) + 1,
                      bool(state.get("expanded")))
     loop = asyncio.get_running_loop()
     matches = await loop.run_in_executor(
         retrieval.get_retrieval_executor(),
-        vector_store.search_course,
-        state["search_query"],          # the only model-influenced argument
+        vector_store.hybrid_search,
+        queries,                        # the only model-influenced argument
         ctx.course_id,
         ctx.include_course_documents,
         top_k,
@@ -228,7 +261,7 @@ async def grade(state: RagState, runtime: Runtime[RagContext]) -> dict:
         logger.warning("rag_graph.grade.fallback id=%s error=%s", ctx.request_id, exc)
         relevant = matches
     if relevant:
-        next_step = "study_sheet" if sheets.is_notes(state["route"].tool.id) else "generate"
+        next_step = "refine"
     elif (
         state.get("retrieved_raw", 0) > 0                      # something exists, just not close enough
         and state.get("attempts", 0) < max_attempts(settings)
@@ -241,6 +274,70 @@ async def grade(state: RagState, runtime: Runtime[RagContext]) -> dict:
 
 def after_grade(state: RagState) -> str:
     """Edge: the next_step chosen by grade."""
+    return state["next_step"]
+
+
+async def _rerank(question: str, matches: list[dict], limit: int, ctx: RagContext) -> list[dict]:
+    """Ask the LLM to order the candidates; unknown or missing numbers keep the fused order.
+
+    The model only reorders passages it was shown, so it can never add a chunk.
+    """
+    listing = "\n\n".join(
+        f"[{i}] {(m['metadata'].get('heading') or '').strip()}\n{m['text'][:RERANK_EXCERPT_CHARS]}".strip()
+        for i, m in enumerate(matches, 1)
+    )
+    result = await llm_provider.generate_structured(
+        _aux_messages("rerank.md", question=question, passages=listing, limit=str(limit)),
+        Ranking, ctx.provider, ctx.model, timeout=get_settings().rag_aux_timeout_seconds,
+        fallback=ctx.fallback,
+    )
+    chosen = [n - 1 for n in dict.fromkeys(result.ranking) if 1 <= n <= len(matches)]
+    rest = [i for i in range(len(matches)) if i not in set(chosen)]
+    return [matches[i] for i in chosen + rest]
+
+
+async def refine(state: RagState, runtime: Runtime[RagContext]) -> dict:
+    """Turn the relevant candidates into the passages the model sees.
+
+    1. Rerank with one LLM call when more than top_k candidates are relevant
+       (RAG_RERANK; fails open to the fused order).
+    2. Keep the best top_k.
+    3. /summarize and /studyguide read the dominant document or section in
+       order when it fits; otherwise the best hits are merged with their
+       neighbouring chunks.
+    """
+    ctx = runtime.context
+    settings = get_settings()
+    matches = state["matches"]
+    limit = final_top_k(state, settings)
+    update: dict = {}
+    if settings.rag_rerank and len(matches) > limit:
+        try:
+            matches = await _rerank(state["question"], matches, limit, ctx)
+        except Exception as exc:  # fail open; CancelledError is not an Exception
+            logger.warning("rag_graph.rerank.fallback id=%s error=%s", ctx.request_id, exc)
+        update["llm_calls"] = 1
+    matches = matches[:limit]
+
+    loop = asyncio.get_running_loop()
+    executor = retrieval.get_retrieval_executor()
+    passages = None
+    if state["route"].tool.id in DOCUMENT_LEVEL_TOOLS:
+        passages = await loop.run_in_executor(executor, retrieval.document_passages, matches,
+                                              ctx.course_id, settings.summary_context_chars)
+    document_level = passages is not None
+    if passages is None:
+        passages = await loop.run_in_executor(executor, vector_store.expand_with_neighbours, matches,
+                                              ctx.course_id, settings.retrieval_neighbour_hits)
+    chat_logger.info("chat.retrieval.refined id=%s candidates=%s passages=%s chunks=%s document_level=%s",
+                     ctx.request_id, len(state["matches"]), len(passages),
+                     retrieval.chunk_count(passages), document_level)
+    next_step = "study_sheet" if sheets.is_notes(state["route"].tool.id) else "generate"
+    return {**update, "matches": passages, "next_step": next_step}
+
+
+def after_refine(state: RagState) -> str:
+    """Edge: generate, or study_sheet for /notes."""
     return state["next_step"]
 
 

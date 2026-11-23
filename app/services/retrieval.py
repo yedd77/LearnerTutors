@@ -1,10 +1,12 @@
 """Retrieval helpers shared by the chat endpoint and the RAG graph."""
+from collections import Counter
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from app.config import Settings, get_settings
 from app.schemas import SourceItem
+from app.services import vector_store
 
 logger = logging.getLogger("app.api.chat")
 
@@ -78,6 +80,54 @@ def filter_by_relevance(matches: list[dict], settings: Settings, request_id: str
     return kept
 
 
+def chunk_count(matches: list[dict]) -> int:
+    """Chunks behind the passages: a merged passage counts every chunk it contains."""
+    return sum(int(match.get("chunk_count", 1)) for match in matches)
+
+
+def document_scope(matches: list[dict]) -> tuple[str, str | None] | None:
+    """The document (and heading) most hits come from, if at least half do.
+
+    Lets /summarize and /studyguide read that document or section in order
+    instead of scattered similar chunks. None when hits are spread out or were
+    indexed before chunk positions were stored.
+    """
+    positioned = [m for m in matches if isinstance(m["metadata"].get("chunk_index"), int)]
+    if not positioned:
+        return None
+    document_id, count = Counter(str(m["metadata"].get("document_id")) for m in positioned).most_common(1)[0]
+    if count * 2 < len(matches):
+        return None
+    headings = Counter(str(m["metadata"].get("heading") or "") for m in positioned
+                       if str(m["metadata"].get("document_id")) == document_id)
+    heading, heading_count = headings.most_common(1)[0]
+    return document_id, (heading if heading and heading_count * 2 >= count else None)
+
+
+def document_passages(matches: list[dict], course_id: int, max_chars: int) -> list[dict] | None:
+    """Read the dominant document/section of ``matches`` in order, one passage per page.
+
+    Returns None (use the normal passages) when there is no dominant document
+    or it does not fit in ``max_chars``. Reads go through the vector store's
+    access filter.
+    """
+    scope = document_scope(matches)
+    if scope is None:
+        return None
+    document_id, heading = scope
+    chunks = vector_store.ordered_document_chunks(document_id, course_id, heading)
+    if not chunks or sum(len(c["text"]) for c in chunks) > max_chars:
+        return None
+    passages: list[dict] = []
+    for chunk in chunks:
+        if passages and passages[-1]["metadata"].get("page") == chunk["metadata"].get("page"):
+            passages[-1]["text"] = vector_store.merge_chunk_texts(passages[-1]["text"], chunk["text"])
+            passages[-1]["chunk_count"] += 1
+        else:
+            passages.append({**chunk, "distance": None, "chunk_count": 1})
+    return passages
+
+
 def build_context_and_sources(matches: list[dict]) -> tuple[str, list[SourceItem]]:
     """Number passages [S1..Sn] and group them into one source per document page."""
     passages, sources, source_indexes = [], [], {}
@@ -86,9 +136,12 @@ def build_context_and_sources(matches: list[dict]) -> tuple[str, list[SourceItem
         page = metadata.get("page", -1)
         page = page if isinstance(page, int) and page > 0 else None
         document_id = str(metadata.get("document_id", ""))
+        heading = str(metadata.get("heading") or "")
         passages.append(
             f"[S{i}] File: {metadata.get('filename', 'Unknown')}; "
-            f"page/slide: {page or 'not available'}\n{match['text']}"
+            f"page/slide: {page or 'not available'}"
+            + (f"; section: {heading}" if heading else "")
+            + f"\n{match['text']}"
         )
         key = (document_id, page)
         source_index = source_indexes.get(key)

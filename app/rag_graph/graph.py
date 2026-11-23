@@ -1,14 +1,18 @@
 """Chat workflow as a LangGraph StateGraph.
 
-START → classify ─conversational─► conversational_reply ─────────────────────► finalize → END
+START → classify ─conversational─► conversational_reply ─────────────────────────────► finalize → END
             │ course_question
             ▼
-        rewrite_query → retrieve → grade ─relevant─► generate → validate ─────► finalize
+        rewrite_query → retrieve → grade ─relevant─► refine → generate → validate ─────► finalize
             ▲    │ same query as before   │ poor, retry allowed
             │    └──────────────────────────────────────► no_context ──────────► finalize
             └────────────────────────┘ poor, exhausted ─► no_context
 
-/notes (note_making): grade ─relevant─► study_sheet ─► finalize. study_sheet either
+retrieve: hybrid dense + keyword search for the query and any sub-queries.
+refine: LLM rerank (when more candidates than top_k), cut to top_k, then
+neighbour expansion or, for /summarize and /studyguide, the whole document in order.
+
+/notes (note_making): grade ─relevant─► refine ─► study_sheet ─► finalize. study_sheet either
 produces StudySheet content (the endpoint renders the PDF) or, when the material is
 too thin, asks to widen the search (needs_expansion) or reports it (insufficient).
 """
@@ -46,7 +50,7 @@ def build_graph():
     """Wire the nodes and conditional edges shown in the module docstring and compile the graph."""
     graph = StateGraph(RagState, context_schema=RagContext)
     for name in ("classify", "conversational_reply", "rewrite_query", "retrieve", "grade",
-                 "generate", "validate", "study_sheet", "no_context", "finalize"):
+                 "refine", "generate", "validate", "study_sheet", "no_context", "finalize"):
         graph.add_node(name, _timed(name, getattr(nodes, name)))
     graph.add_edge(START, "classify")
     graph.add_conditional_edges("classify", nodes.after_classify,
@@ -55,7 +59,8 @@ def build_graph():
     graph.add_conditional_edges("rewrite_query", nodes.after_rewrite, ["retrieve", "no_context"])
     graph.add_edge("retrieve", "grade")
     graph.add_conditional_edges("grade", nodes.after_grade,
-                                ["generate", "study_sheet", "rewrite_query", "no_context"])
+                                ["refine", "rewrite_query", "no_context"])
+    graph.add_conditional_edges("refine", nodes.after_refine, ["generate", "study_sheet"])
     graph.add_edge("generate", "validate")
     graph.add_edge("validate", "finalize")
     graph.add_edge("no_context", "finalize")

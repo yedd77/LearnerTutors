@@ -7,7 +7,7 @@ TEXT = "0123456789" * 100  # 1000 chars
 def test_short_text_is_one_chunk_with_page_preserved(configure):
     configure(CHUNK_SIZE="900", CHUNK_OVERLAP="150")
     chunks = chunk_sections([{"page": 7, "text": "Short text."}])
-    assert chunks == [{"page": 7, "text": "Short text."}]
+    assert chunks == [{"page": 7, "heading": None, "text": "Short text.", "chunk_index": 0}]
 
 
 def test_windows_overlap_by_configured_amount(configure):
@@ -30,7 +30,8 @@ def test_each_section_keeps_its_own_page(configure):
     configure(CHUNK_SIZE="300", CHUNK_OVERLAP="50")
     chunks = chunk_sections([{"page": 1, "text": TEXT}, {"page": 2, "text": "second page"}])
     assert {c["page"] for c in chunks[:-1]} == {1}
-    assert chunks[-1] == {"page": 2, "text": "second page"}
+    assert chunks[-1] == {"page": 2, "heading": None, "text": "second page",
+                          "chunk_index": len(chunks) - 1}
 
 
 def test_missing_page_becomes_none():

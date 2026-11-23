@@ -62,8 +62,12 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama server for chat and/or embeddings |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint |
 | `OPENAI_TIMEOUT_SECONDS` / `GEMINI_TIMEOUT_SECONDS` / `OLLAMA_TIMEOUT_SECONDS` | 120 / 180 / 180 | Provider request timeouts |
-| `TOP_K` | 5 | Chunks retrieved per question (some tools use 10) |
-| `RETRIEVAL_MAX_DISTANCE` | calibrated per embedding model | Relevance cut-off. `text-embedding-3-small` uses 0.70; uncalibrated models are not filtered. `0` disables it. See DECISION-005 in `conductor/decision-log.md` |
+| `TOP_K` | 6 | Passages given to the model per question (some tools use 10) |
+| `RETRIEVAL_CANDIDATES` | 20 | Candidates per query from dense and keyword search before fusion and reranking (max 50) |
+| `RAG_RERANK` | true | One LLM call reorders the candidates when more than `TOP_K` are relevant |
+| `RETRIEVAL_NEIGHBOUR_HITS` | 3 | The best N passages are merged with their neighbouring chunks |
+| `SUMMARY_CONTEXT_CHARS` | 24000 | `/summarize` and `/studyguide` read a whole document or section in order when it fits |
+| `RETRIEVAL_MAX_DISTANCE` | calibrated per embedding model | Relevance cut-off. `text-embedding-3-small` uses 0.70; uncalibrated models are not filtered (`GET /admin/config` reports `relevance_filter`; measure one with `eval/calibrate_threshold.py`). `0` disables it. See DECISION-005 in `conductor/decision-log.md` |
 | `RAG_MAX_RETRIEVAL_ATTEMPTS` | 2 (max 3) | First search plus rewritten retries |
 | `RAG_AUX_TIMEOUT_SECONDS` | 20 | Timeout for the classify/rewrite LLM calls. On timeout, the request carries on without them |
 | `CHROMA_PATH` / `CHROMA_COLLECTION` | `./storage/chroma` / `ragassistant_chunks` | Vector store location and name prefix |

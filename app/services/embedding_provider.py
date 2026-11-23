@@ -21,6 +21,16 @@ _OPENAI_BATCH = 100
 _OLLAMA_BATCH = 32
 _GEMINI_BATCH = 100
 
+# nomic-embed-text was trained with task prefixes and retrieves noticeably worse
+# without them; Ollama does not add them. Changing this changes the vectors, so
+# the prefix is part of Settings.embedding_identity (a new collection + reindex).
+_NOMIC_PREFIXES = {"RETRIEVAL_DOCUMENT": "search_document: ", "RETRIEVAL_QUERY": "search_query: "}
+
+
+def uses_nomic_prefixes(provider: str, model: str) -> bool:
+    """True for Ollama nomic-embed models, which need ``search_query:``/``search_document:``."""
+    return provider.lower() == "ollama" and "nomic-embed" in model.lower()
+
 
 class EmbeddingError(RuntimeError):
     """Embedding failed: bad configuration, a provider error, or an unexpected response."""
@@ -90,8 +100,12 @@ def _embed_openai(texts: list[str], model: str, settings: Settings) -> list[list
     return vectors
 
 
-def _embed_ollama(texts: list[str], model: str, settings: Settings) -> list[list[float]]:
-    """Embed with a local Ollama server's ``/api/embed`` endpoint."""
+def _embed_ollama(texts: list[str], model: str, settings: Settings,
+                  task_type: str = "RETRIEVAL_DOCUMENT") -> list[list[float]]:
+    """Embed with a local Ollama server's ``/api/embed`` endpoint (nomic task prefixes added)."""
+    if uses_nomic_prefixes("ollama", model):
+        prefix = _NOMIC_PREFIXES.get(task_type, _NOMIC_PREFIXES["RETRIEVAL_DOCUMENT"])
+        texts = [prefix + text for text in texts]
     vectors: list[list[float]] = []
     for batch in _batches(texts, _OLLAMA_BATCH):
         response = requests.post(
@@ -130,7 +144,8 @@ def embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT",
     """Return one embedding vector per text, using the configured embedding provider.
 
     ``task_type`` is ``RETRIEVAL_DOCUMENT`` for indexing and ``RETRIEVAL_QUERY``
-    for questions; only Gemini uses it. ``settings`` overrides the stored
+    for questions; Gemini receives it as a parameter and Ollama nomic models as a
+    text prefix. ``settings`` overrides the stored
     configuration (the configuration test passes unsaved values). All failures
     are raised as EmbeddingError (HTTP errors include up to 1000 characters of
     the provider's response).
@@ -153,7 +168,7 @@ def embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT",
         if provider == "openai":
             vectors = _embed_openai(texts, model, settings)
         elif provider == "ollama":
-            vectors = _embed_ollama(texts, model, settings)
+            vectors = _embed_ollama(texts, model, settings, task_type)
         else:
             vectors = _embed_gemini(texts, model, settings, task_type)
         logger.info(
