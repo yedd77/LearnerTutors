@@ -13,8 +13,11 @@ import asyncio
 import logging
 from typing import Literal, TypedDict
 
-from app.config import Settings
-from app.services import illustrations, llm_provider
+import requests
+
+from app.config import EMBEDDING_PROVIDERS, Settings
+from app.services import embedding_provider, illustrations, llm_provider
+from app.services.embedding_provider import EmbeddingError
 from app.services.llm_provider import SUPPORTED_PROVIDERS, ProviderError
 
 logger = logging.getLogger(__name__)
@@ -22,6 +25,8 @@ logger = logging.getLogger(__name__)
 # Upper bounds per check. Image generation is slower than a one-word chat reply.
 LLM_CHECK_TIMEOUT_SECONDS = 60.0
 IMAGE_CHECK_TIMEOUT_SECONDS = 120.0
+EMBEDDING_CHECK_TIMEOUT_SECONDS = 60.0
+EMBEDDING_CHECK_TEXT = "configuration test"
 
 _PROVIDER_LABELS = {"openai": "OpenAI", "gemini": "Gemini", "ollama": "Ollama"}
 
@@ -39,7 +44,8 @@ def _result(status: Literal["pass", "fail", "skipped"], message: str) -> CheckRe
 def _redact(text: str, settings: Settings) -> str:
     """Remove every configured provider key from ``text`` before it is logged."""
     for secret in (settings.openai_api_key, settings.gemini_api_key,
-                   settings.image_openai_api_key, settings.image_gemini_api_key):
+                   settings.image_openai_api_key, settings.image_gemini_api_key,
+                   settings.embedding_openai_api_key, settings.embedding_gemini_api_key):
         if secret:
             text = text.replace(secret, "[redacted]")
     return text
@@ -141,17 +147,66 @@ async def check_image_generation(settings: Settings) -> CheckResult:
     return _result("pass", "Image generation is working.")
 
 
-async def run_configuration_checks(settings: Settings,
-                                   fallback_model: str) -> dict[str, CheckResult]:
-    """Run the three provider checks concurrently and return a result per check.
+async def check_embedding(settings: Settings, requested: bool) -> CheckResult:
+    """Embedding provider: embed one short text and expect one non-empty vector.
+
+    Runs only when Moodle asks (``test_embedding``): a blank model is a valid
+    selection (the provider default), so it cannot signal "skip".
+    """
+    if not requested:
+        return _result("skipped", "Embedding check not requested.")
+    provider = (settings.embedding_provider or "").lower()
+    model = settings.resolved_embedding_model
+    label = f"Embedding ({_PROVIDER_LABELS.get(provider, provider)})"
+    if provider not in EMBEDDING_PROVIDERS:
+        return _result("fail", f"Unsupported embedding provider: {provider}.")
+    if not model:
+        return _result("fail", "No embedding model is selected.")
+    reuse = settings.embedding_reuse_chat_api_key
+    if reuse:
+        reuse_error = embedding_provider.chat_key_reuse_error(provider, settings.llm_provider)
+        if reuse_error:
+            return _result("fail", reuse_error)
+    if provider != "ollama" and not embedding_provider.embedding_api_key(provider, settings):
+        if reuse:
+            return _result("fail", f"No {_PROVIDER_LABELS[provider]} chat API key is configured "
+                                   "to reuse for embeddings.")
+        return _result("fail", f"No {_PROVIDER_LABELS[provider]} API key is configured for embeddings.")
+    try:
+        # The thread cannot be cancelled; on timeout it finishes in the background.
+        vectors = await asyncio.wait_for(
+            asyncio.to_thread(embedding_provider.embed_texts, [EMBEDDING_CHECK_TEXT],
+                              "RETRIEVAL_QUERY", settings),
+            EMBEDDING_CHECK_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _log_failure("embedding", exc, settings)
+        cause = exc.__cause__
+        if isinstance(exc, EmbeddingError) and cause is None:
+            # Raised by our own validation (e.g. wrong vector count): no provider text.
+            return _result("fail", f"{label}: {exc}")
+        if isinstance(cause, (requests.ConnectionError, requests.Timeout)):
+            return _result("fail", f"{label} could not be reached.")
+        return _result("fail", _failure_message(exc, label))
+    if len(vectors) != 1 or not vectors[0]:
+        return _result("fail", f"{label} returned no usable vector.")
+    return _result("pass", f"{provider} {model} returned a {len(vectors[0])}-dimension vector.")
+
+
+async def run_configuration_checks(settings: Settings, fallback_model: str,
+                                   test_embedding: bool = False) -> dict[str, CheckResult]:
+    """Run the provider checks concurrently and return a result per check.
 
     An unexpected error in one check becomes that check's ``fail`` result.
     """
-    names = ("llm", "fallback_model", "image_generation")
+    names = ("llm", "fallback_model", "image_generation", "embedding")
     outcomes = await asyncio.gather(
         check_llm(settings),
         check_fallback_model(settings, fallback_model),
         check_image_generation(settings),
+        check_embedding(settings, test_embedding),
         return_exceptions=True,
     )
     results: dict[str, CheckResult] = {}

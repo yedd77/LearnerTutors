@@ -3,9 +3,11 @@
 Two sources are combined:
 
 * ``.env`` / environment variables (``Settings``): secrets, provider URLs and
-  timeouts, the embedding model, storage paths and limits.
-* ``storage/runtime_config.json``: the chat/image provider, model and
-  Fernet-encrypted API keys that Moodle pushes via ``POST /admin/config``.
+  timeouts, the default embedding provider/model, storage paths and limits.
+* ``storage/runtime_config.json``: the chat/image/embedding provider, model and
+  Fernet-encrypted API keys that Moodle pushes via ``POST /admin/config``. A
+  Moodle embedding selection overrides ``EMBEDDING_PROVIDER``/``EMBEDDING_MODEL``;
+  without one, the ``.env`` embedding settings apply.
   ``get_settings()`` re-reads it whenever the file changes, so every worker
   process picks up a new model or key on its next request.
 """
@@ -50,8 +52,15 @@ class Settings(BaseSettings):
     image_model: str = Field(default="", validation_alias="MOODLE_RUNTIME_IMAGE_MODEL")
     image_provider: str = Field(default="openai", validation_alias="MOODLE_RUNTIME_IMAGE_PROVIDER")
     reuse_chat_api_key: bool = Field(default=False, validation_alias="MOODLE_RUNTIME_REUSE_CHAT_API_KEY")
+    # Embeddings use the chat key for their provider instead of a separate embedding key.
+    embedding_reuse_chat_api_key: bool = Field(
+        default=False, validation_alias="MOODLE_RUNTIME_EMBEDDING_REUSE_CHAT_API_KEY")
     image_openai_api_key: str = ""
     image_gemini_api_key: str = ""
+    # Moodle-managed embedding keys; when blank, embeddings use the chat key for
+    # that provider (Moodle, then .env), as before.
+    embedding_openai_api_key: str = ""
+    embedding_gemini_api_key: str = ""
 
     # Environment credentials remain as fallback for existing deployments.
     openai_api_key: str = ""
@@ -79,6 +88,7 @@ class Settings(BaseSettings):
     # third party, so it stays off unless explicitly enabled.
     langsmith_tracing: bool = False
 
+    # Defaults; Moodle can override both at runtime (see _runtime_overrides).
     embedding_provider: str = "openai"
     embedding_model: str = ""
 
@@ -150,6 +160,17 @@ class Settings(BaseSettings):
         }
         return defaults.get(self.embedding_provider.lower(), "")
 
+    @property
+    def embedding_identity(self) -> str:
+        """``provider:model:dimension_tag``: vectors are comparable only within one identity.
+
+        Chroma keeps one collection per identity, and a change requires re-indexing.
+        Only Gemini has a configurable output dimension, so only it is tagged.
+        """
+        provider = self.embedding_provider.lower()
+        dimension_tag = str(self.gemini_embed_dimensions) if provider == "gemini" else "default"
+        return f"{provider}:{self.resolved_embedding_model}:{dimension_tag}"
+
 
 _TRACING_ENV_VARS = ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2")
 
@@ -196,7 +217,8 @@ def decrypt_provider_secret(value: str) -> str:
 
 
 # Runtime-config fields Moodle may override, and where its encrypted keys go.
-_RUNTIME_FIELDS = {"llm_provider", "llm_model", "image_model", "image_provider", "reuse_chat_api_key"}
+_RUNTIME_FIELDS = {"llm_provider", "llm_model", "image_model", "image_provider", "reuse_chat_api_key",
+                   "embedding_reuse_chat_api_key"}
 _RUNTIME_KEY_FIELDS = (
     # Moodle-managed chat credentials take precedence over environment values.
     ("provider_api_keys", "openai", "openai_api_key"),
@@ -204,7 +226,11 @@ _RUNTIME_KEY_FIELDS = (
     # Image credentials are stored separately from chat credentials.
     ("image_provider_api_keys", "openai", "image_openai_api_key"),
     ("image_provider_api_keys", "gemini", "image_gemini_api_key"),
+    # Embedding credentials too; without one, embeddings fall back to the chat key.
+    ("embedding_provider_api_keys", "openai", "embedding_openai_api_key"),
+    ("embedding_provider_api_keys", "gemini", "embedding_gemini_api_key"),
 )
+EMBEDDING_PROVIDERS = ("openai", "gemini", "ollama")
 
 
 def _runtime_overrides(values: Any) -> dict[str, Any]:
@@ -212,6 +238,12 @@ def _runtime_overrides(values: Any) -> dict[str, Any]:
     if not isinstance(values, dict):
         raise ValueError("Runtime configuration must be a JSON object.")
     overrides = {key: value for key, value in values.items() if key in _RUNTIME_FIELDS}
+    # A Moodle embedding selection replaces both .env values; a blank model means
+    # the provider's default. No (or an unknown) provider leaves .env in charge.
+    if values.get("embedding_provider") in EMBEDDING_PROVIDERS:
+        overrides["embedding_provider"] = values["embedding_provider"]
+        model = values.get("embedding_model")
+        overrides["embedding_model"] = model.strip() if isinstance(model, str) else ""
     for section, provider, field in _RUNTIME_KEY_FIELDS:
         stored = values.get(section, {})
         encrypted = stored.get(provider) if isinstance(stored, dict) else None
@@ -256,3 +288,16 @@ def get_settings() -> Settings:
         _settings_cache = settings
         _settings_cache_mtime = current_mtime
         return settings
+
+
+def reload_settings() -> Settings:
+    """Drop this process's cached settings and load them again.
+
+    Used right after writing the runtime config, where an unchanged mtime on a
+    coarse clock would otherwise return the previous values.
+    """
+    global _settings_cache, _settings_cache_mtime
+    with _settings_lock:
+        _settings_cache = None
+        _settings_cache_mtime = None
+    return get_settings()

@@ -1,6 +1,6 @@
 # Dynamic AI provider credentials
 
-Moodle administrators configure chat and image generation independently from:
+Moodle administrators configure chat, image generation and text embeddings independently from:
 
 **Site administration → Plugins → Local plugins → Course Learning Assistant**
 
@@ -26,14 +26,16 @@ Existing `OPENAI_API_KEY` and `GEMINI_API_KEY` environment variables remain supp
 - **Image provider / Image generation model / Image provider API key** control `/explain` illustrations independently. OpenAI and Gemini are supported. Example image models are `gpt-image-1` and `gemini-3.1-flash-image`.
 - **Reuse chat provider API key** lets image generation use the chat credential without entering it a second time. Enable it only when the selected chat and image providers are identical. FastAPI validates this condition and rejects mismatched reuse.
 - If reuse is disabled, the image key is stored separately from the chat key, even when both providers are the same.
+- **Embedding provider / Embedding model / Embedding API keys** control the text embeddings used for indexing and retrieval. A blank provider keeps the backend's `.env` embedding settings (`EMBEDDING_PROVIDER`/`EMBEDDING_MODEL`); a blank model uses the provider's default. Without a saved embedding key, embeddings use the chat key for that provider.
+- Changing the embedding provider or model is a migration: FastAPI returns `reindex_required: true` and Moodle queues a full reindex. Changing only an embedding key does not.
 - Blank password fields preserve existing credentials. Saved keys are never rendered back into the browser.
 
 ## How updates work
 
 - Moodle stores chat and image provider credentials as separate AES-256-GCM ciphertext values in `config_plugins`. The encryption key is `LOCAL_RAGASSISTANT_ENCRYPTION_KEY`, configured outside the database.
 - On the next chat or document-indexing request, Moodle decrypts the keys inside PHP and sends them to the authenticated FastAPI admin configuration endpoint over the configured backend connection.
-- FastAPI encrypts the chat and image credentials separately with Fernet before writing them to `storage/runtime_config.json`.
-- Runtime configuration is refreshed when the file changes, including across multiple FastAPI worker processes. No FastAPI restart or document reindex is required for provider/model/key changes.
+- FastAPI encrypts the chat, image and embedding credentials separately with Fernet before writing them to `storage/runtime_config.json`.
+- Runtime configuration is refreshed when the file changes, including across multiple FastAPI worker processes. No FastAPI restart is required. No document reindex is required for chat or image changes, or for key-only changes; an embedding provider/model change requires one.
 - The admin config read endpoint returns only boolean configured indicators. It never returns provider key values.
 - `RAG_API_KEY`, `LOCAL_RAGASSISTANT_ENCRYPTION_KEY`, and `RUNTIME_CONFIG_ENCRYPTION_KEY` have different purposes and must not be reused interchangeably.
 

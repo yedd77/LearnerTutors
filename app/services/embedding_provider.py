@@ -1,8 +1,12 @@
 """Text embeddings for indexing and retrieval (OpenAI, Gemini or Ollama).
 
-The embedding provider/model is configured only in ``.env`` (EMBEDDING_PROVIDER,
-EMBEDDING_MODEL). Vectors from different models are not comparable, so a change
-selects a different Chroma collection and requires re-indexing.
+The provider/model comes from Moodle (``POST /admin/config``) when it sets one,
+otherwise from ``.env`` (EMBEDDING_PROVIDER, EMBEDDING_MODEL). The API key is
+the chat key for that provider when ``embedding_reuse_chat_api_key`` is on;
+otherwise the Moodle-managed embedding key if stored, then the chat key
+(Moodle, then ``.env``). Vectors from different models are not
+comparable, so a provider/model change selects a different Chroma collection
+and requires re-indexing.
 """
 import logging
 import time
@@ -35,15 +39,48 @@ def _check_count(vectors: list, batch: list[str], provider_label: str) -> list:
     return vectors
 
 
+def chat_key_reuse_error(embedding_provider: str, llm_provider: str) -> str | None:
+    """Why the chat key cannot be reused for embeddings, or None if it can.
+
+    Shared by ``POST /admin/config`` (422) and the configuration test (fail).
+    """
+    embedding_provider = (embedding_provider or "").lower()
+    llm_provider = (llm_provider or "").lower()
+    if "ollama" in (embedding_provider, llm_provider):
+        return "The chat API key cannot be reused with Ollama, which uses no API key."
+    if embedding_provider != llm_provider:
+        return "The chat API key can only be reused when chat and embedding providers are the same."
+    return None
+
+
+def embedding_api_key(provider: str, settings: Settings) -> str:
+    """The key used for embeddings.
+
+    With ``embedding_reuse_chat_api_key`` on: the chat key for ``provider``,
+    ignoring any stored embedding key. Otherwise the Moodle embedding key, else
+    the chat key (Moodle, then ``.env``).
+    """
+    if provider == "openai":
+        chat_key, embedding_key = settings.openai_api_key, settings.embedding_openai_api_key
+    elif provider == "gemini":
+        chat_key, embedding_key = settings.gemini_api_key, settings.embedding_gemini_api_key
+    else:
+        return ""
+    if settings.embedding_reuse_chat_api_key:
+        return chat_key
+    return embedding_key or chat_key
+
+
 def _embed_openai(texts: list[str], model: str, settings: Settings) -> list[list[float]]:
     """Embed with the OpenAI-compatible ``/embeddings`` endpoint, preserving input order."""
-    if not settings.openai_api_key:
-        raise EmbeddingError("OPENAI_API_KEY is not configured.")
+    api_key = embedding_api_key("openai", settings)
+    if not api_key:
+        raise EmbeddingError("No OpenAI API key is configured for embeddings.")
     vectors: list[list[float]] = []
     for batch in _batches(texts, _OPENAI_BATCH):
         response = requests.post(
             f"{settings.openai_base_url.rstrip('/')}/embeddings",
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            headers={"Authorization": f"Bearer {api_key}"},
             json={"model": model, "input": batch},
             timeout=settings.openai_timeout_seconds,
         )
@@ -73,9 +110,10 @@ def _embed_gemini(texts: list[str], model: str, settings: Settings,
     from google import genai
     from google.genai import types
 
-    if not settings.gemini_api_key:
-        raise EmbeddingError("GEMINI_API_KEY is not configured.")
-    client = genai.Client(api_key=settings.gemini_api_key)
+    api_key = embedding_api_key("gemini", settings)
+    if not api_key:
+        raise EmbeddingError("No Gemini API key is configured for embeddings.")
+    client = genai.Client(api_key=api_key)
     config = types.EmbedContentConfig(
         task_type=task_type,
         output_dimensionality=settings.gemini_embed_dimensions or None,
@@ -87,16 +125,19 @@ def _embed_gemini(texts: list[str], model: str, settings: Settings,
     return vectors
 
 
-def embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> list[list[float]]:
+def embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT",
+                settings: Settings | None = None) -> list[list[float]]:
     """Return one embedding vector per text, using the configured embedding provider.
 
     ``task_type`` is ``RETRIEVAL_DOCUMENT`` for indexing and ``RETRIEVAL_QUERY``
-    for questions; only Gemini uses it. All failures are raised as EmbeddingError
-    (HTTP errors include up to 1000 characters of the provider's response).
+    for questions; only Gemini uses it. ``settings`` overrides the stored
+    configuration (the configuration test passes unsaved values). All failures
+    are raised as EmbeddingError (HTTP errors include up to 1000 characters of
+    the provider's response).
     """
     if not texts:
         return []
-    settings = get_settings()
+    settings = settings or get_settings()
     provider = settings.embedding_provider.lower()
     model = settings.resolved_embedding_model
     if provider not in {"openai", "gemini", "ollama"}:

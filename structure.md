@@ -84,7 +84,8 @@ LearnerTutors/
 
 ### `app/config.py`
 
-- `Settings` reads infrastructure settings from `.env`: secrets, provider URLs and timeouts, embedding config, Chroma, limits and the RAG graph limits.
+- `Settings` reads infrastructure settings from `.env`: secrets, provider URLs and timeouts, the default embedding config, Chroma, limits and the RAG graph limits. A Moodle embedding selection in `runtime_config.json` overrides `EMBEDDING_PROVIDER`/`EMBEDDING_MODEL`.
+- `Settings.embedding_identity` (provider, resolved model, Gemini dimensions) names the embedding space. It selects the Chroma collection and decides when a reindex is required.
 - `get_settings()` overlays `storage/runtime_config.json`, the chat/image provider and model plus encrypted keys that Moodle writes. It reloads when the file's modification time changes, which keeps every worker process in sync without a restart.
 - `CALIBRATED_MAX_DISTANCE` holds the measured relevance cut-off for each embedding model. `resolved_retrieval_max_distance` applies it unless `RETRIEVAL_MAX_DISTANCE` overrides it.
 
@@ -113,9 +114,13 @@ All routers except `/illustrations` require the `X-RAG-API-Key` header.
 ### `app/api/admin.py`
 
 - `POST /admin/connection-test` confirms that Moodle can authenticate.
-- `GET /admin/config` reports the current provider and model, and whether keys are configured. It returns booleans only, never the keys.
-- `POST /admin/config` is how Moodle pushes the chat/image provider, model and keys. The keys are Fernet-encrypted into `storage/runtime_config.json`. Embedding settings are read-only here.
-- `POST /admin/test-configuration` tests the settings form as sent, including unsaved values, without saving anything. It takes the `/admin/config` fields plus `fallback_model`; blank keys use the stored ones. It makes small real calls to the main LLM, an Ollama fallback model and the image provider, at the same time, and returns `results.{authentication, llm, fallback_model, image_generation}` with `pass`, `fail` or `skipped` and a fixed safe message. One failure does not stop the others; the response is always 200 unless the API key or input is invalid. Provider error text goes only to the server log, with keys redacted.
+- `GET /admin/config` reports the current provider and model, whether keys are configured, and `embedding_source` (`moodle` or `env`). It returns booleans only, never the keys.
+- `POST /admin/config` is how Moodle pushes the chat/image/embedding provider, model and keys. The keys are Fernet-encrypted into `storage/runtime_config.json`.
+  - `embedding_provider=""` (the default, and what older clients imply) means no Moodle override: the `.env` embedding settings apply, and any previous override is removed. A blank `embedding_model` means the provider default.
+  - Embedding keys (`openai_embedding_api_key`, `gemini_embedding_api_key`) are stored separately. Without one, embeddings use the chat key for that provider.
+  - `embedding_reuse_chat_api_key` (like `reuse_chat_api_key` for images) makes embeddings use the chat key and ignore any stored embedding key. It needs matching, non-Ollama chat and embedding providers, otherwise 422 (the configuration test reports a `fail` instead). With `embedding_provider=""` it is ignored and stored as false. It is not part of the embedding identity, so it never triggers a reindex.
+  - When the embedding identity changes, the response has `embedding_changed` and `reindex_required` set to true, and Moodle queues a full reindex. A key-only change is not an identity change.
+- `POST /admin/test-configuration` tests the settings form as sent, including unsaved values, without saving anything. It takes the `/admin/config` fields plus `fallback_model` and `test_embedding`; blank keys use the stored ones. It makes small real calls to the main LLM, an Ollama fallback model, the image provider and (only when `test_embedding` is true) the embedding provider, at the same time, and returns `results.{authentication, llm, fallback_model, image_generation, embedding}` with `pass`, `fail` or `skipped` and a fixed safe message. One failure does not stop the others; the response is always 200 unless the API key or input is invalid. Provider error text goes only to the server log, with keys redacted.
 
 ### `app/api/illustrations.py`
 
@@ -192,9 +197,9 @@ Each node logs `rag_graph.node.finish`. Every request ends with `rag_graph.finis
 
   Scanned PDFs need OCR, which isn't included.
 - **`chunker.py`** creates overlapping character windows (`CHUNK_SIZE`/`CHUNK_OVERLAP`) and keeps each chunk's page number.
-- **`embedding_provider.py`** produces embeddings through OpenAI, Gemini or Ollama, configured only in `.env` with `EMBEDDING_PROVIDER`/`EMBEDDING_MODEL`.
+- **`embedding_provider.py`** produces embeddings through OpenAI, Gemini or Ollama. The provider/model comes from Moodle when it sets one, otherwise from `.env` (`EMBEDDING_PROVIDER`/`EMBEDDING_MODEL`). The key is the chat key when `embedding_reuse_chat_api_key` is on; otherwise the Moodle embedding key, then the chat key. `embed_texts(..., settings=)` accepts unsaved settings for the configuration test.
 - **`vector_store.py`:**
-  - opens the Chroma collection for the active embedding model, named `<prefix>_<provider>_<model>_<hash>`;
+  - opens the Chroma collection for the active embedding model, named `<prefix>_<provider>_<model>_<hash>`, and reopens it in every worker when the embedding identity changes;
   - indexes and replaces documents;
   - searches with course scoping;
   - deletes documents and toggles retrieval;
@@ -240,14 +245,14 @@ Moodle chat (POST /api/v1/chat, provider + model from Moodle)
 
 ```text
 Moodle admin settings
-    -> POST /api/v1/admin/config          provider, model, keys (authenticated with X-RAG-API-Key)
+    -> POST /api/v1/admin/config          chat/image/embedding provider, model, keys (X-RAG-API-Key)
     -> admin.py                           Fernet-encrypt keys with RUNTIME_CONFIG_ENCRYPTION_KEY
     -> storage/runtime_config.json        atomic replace
     -> config.get_settings()              every worker reloads when the file's mtime changes
     -> llm_provider._chat_model()         next request builds a new model with the new settings
 ```
 
-Changing the **chat** model needs nothing else. Changing the **embedding** provider or model (in `.env`, then restart) switches to a different Chroma collection, so every document must be re-indexed. The previous collection stays on disk.
+Changing the **chat** model needs nothing else. Changing the **embedding** provider or model (in Moodle, or in `.env` and then restart) switches to a different Chroma collection, so every document must be re-indexed. For a Moodle change, `POST /admin/config` returns `reindex_required: true` and Moodle queues the reindex. Until it finishes, retrieval finds nothing in the new collection. The previous collection stays on disk.
 
 ## Important limitations
 

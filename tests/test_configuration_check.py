@@ -113,6 +113,7 @@ def test_all_checks_pass(client, auth, chat_models, image_api):
         "llm": {"status": "pass", "message": "Main LLM is responding."},
         "fallback_model": {"status": "pass", "message": "Ollama fallback model is responding."},
         "image_generation": {"status": "pass", "message": "Image generation is working."},
+        "embedding": {"status": "skipped", "message": "Embedding check not requested."},
     }
     calls = {(c["provider"], c["model"]) for c in chat_models["built"]}
     assert calls == {("openai", "gpt-test"), ("ollama", "llama-test")}
@@ -271,3 +272,220 @@ def test_chat_model_uses_supplied_settings(configure):
     model = llm._chat_model("openai", "gpt-x", settings=settings)
     assert model.openai_api_key.get_secret_value() == OPENAI_KEY
     assert llm._chat_model("openai", "gpt-x").openai_api_key.get_secret_value().startswith("sk-env-")
+
+
+# --------------------------------------------------------------------------- embedding check
+import app.services.embedding_provider as embeddings  # noqa: E402
+
+EMBED_KEY = "sk-unsaved-embed-" + "k" * 30
+
+
+class FakeEmbeddingResponse:
+    def __init__(self, status=200, vectors=None, text=""):
+        self.status_code, self.text = status, text
+        self.vectors = [[0.1, 0.2, 0.3]] if vectors is None else vectors
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"HTTP {self.status_code}", response=self)
+
+    def json(self):
+        return {"data": [{"index": i, "embedding": v} for i, v in enumerate(self.vectors)]}
+
+
+@pytest.fixture
+def embedding_api(monkeypatch):
+    """Fake OpenAI /embeddings endpoint. Set ``.response`` (or ``.error``) to change the reply."""
+    class Handle:
+        response = FakeEmbeddingResponse()
+        error = None
+
+    handle = Handle()
+    handle.calls = []
+    # illustrations and embedding_provider share the requests module: hand
+    # non-embedding calls to whatever fake was installed before (image_api).
+    previous = embeddings.requests.post
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        if not url.endswith("/embeddings"):
+            return previous(url, headers=headers, json=json, timeout=timeout)
+        handle.calls.append({"url": url, "headers": headers, "json": json})
+        if handle.error is not None:
+            raise handle.error
+        return handle.response
+
+    monkeypatch.setattr(embeddings.requests, "post", fake_post)
+    return handle
+
+
+EMBED = {**FULL, "test_embedding": True, "embedding_provider": "openai",
+         "embedding_model": "embed-unsaved", "openai_embedding_api_key": EMBED_KEY}
+
+
+def test_embedding_check_is_skipped_unless_requested(client, auth, chat_models, image_api,
+                                                     embedding_api):
+    body = results(client.post(URL, headers=auth, json={**EMBED, "test_embedding": False}))
+    assert body["embedding"] == {"status": "skipped", "message": "Embedding check not requested."}
+    assert embedding_api.calls == []
+
+
+def test_embedding_check_passes_with_unsaved_values(client, auth, chat_models, image_api,
+                                                    embedding_api, runtime_path):
+    response = client.post(URL, headers=auth, json=EMBED)
+    body = results(response)
+    assert body["embedding"] == {
+        "status": "pass", "message": "openai embed-unsaved returned a 3-dimension vector."}
+    call = embedding_api.calls[0]
+    assert call["json"] == {"model": "embed-unsaved", "input": ["configuration test"]}
+    assert call["headers"]["Authorization"] == f"Bearer {EMBED_KEY}"
+    assert EMBED_KEY not in response.text
+    assert not runtime_path.exists()            # nothing saved
+
+
+def test_blank_embedding_provider_tests_the_env_settings(client, auth, chat_models, image_api,
+                                                         embedding_api):
+    payload = {**FULL, "test_embedding": True, "embedding_provider": "",
+               "embedding_model": "ignored", "openai_api_key": OPENAI_KEY}
+    body = results(client.post(URL, headers=auth, json=payload))
+    assert body["embedding"]["message"] == "openai test-embed returned a 3-dimension vector."
+    # No embedding key anywhere: falls back to the chat key, as before.
+    assert embedding_api.calls[0]["headers"]["Authorization"] == f"Bearer {OPENAI_KEY}"
+
+
+def test_blank_embedding_model_uses_provider_default(client, auth, chat_models, image_api,
+                                                     embedding_api):
+    body = results(client.post(URL, headers=auth, json={**EMBED, "embedding_model": ""}))
+    assert body["embedding"]["status"] == "pass"
+    assert embedding_api.calls[0]["json"]["model"] == "test-embed"
+
+
+def test_stored_embedding_key_is_used_when_blank(client, auth, chat_models, image_api,
+                                                 embedding_api):
+    saved = client.post("/api/v1/admin/config", headers=auth,
+                        json={"llm_provider": "openai", "llm_model": "m",
+                              "openai_embedding_api_key": EMBED_KEY})
+    assert saved.status_code == 200
+    body = results(client.post(URL, headers=auth, json={**EMBED, "openai_embedding_api_key": " "}))
+    assert body["embedding"]["status"] == "pass"
+    assert embedding_api.calls[0]["headers"]["Authorization"] == f"Bearer {EMBED_KEY}"
+
+
+@pytest.mark.parametrize("status, expected", [
+    (401, "Embedding (OpenAI) rejected the API key (HTTP 401)."),
+    (404, "Embedding (OpenAI): the model was not found or is not available (HTTP 404)."),
+    (429, "Embedding (OpenAI) is rate-limited or out of quota (HTTP 429)."),
+])
+def test_embedding_http_failure_is_safe(client, auth, chat_models, image_api, embedding_api,
+                                        caplog, status, expected):
+    caplog.set_level(logging.INFO)
+    embedding_api.response = FakeEmbeddingResponse(
+        status, text=f'{{"error": "bad key {EMBED_KEY}"}}')
+    response = client.post(URL, headers=auth, json=EMBED)
+    body = results(response)
+    assert body["embedding"]["status"] == "fail"
+    assert body["embedding"]["message"].startswith(expected)
+    assert body["llm"]["status"] == "pass"       # other checks are unaffected
+    assert EMBED_KEY not in response.text
+    # The provider body (echoing the key) is logged server-side, redacted.
+    assert "config_check.fail check=embedding" in caplog.text
+    assert EMBED_KEY not in caplog.text
+
+
+def test_embedding_unreachable(client, auth, chat_models, image_api, embedding_api):
+    embedding_api.error = requests.ConnectionError("connection refused")
+    body = results(client.post(URL, headers=auth, json=EMBED))
+    assert body["embedding"] == {"status": "fail", "message": "Embedding (OpenAI) could not be reached."}
+
+
+def test_embedding_empty_vector_fails(client, auth, chat_models, image_api, embedding_api):
+    embedding_api.response = FakeEmbeddingResponse(vectors=[[]])
+    body = results(client.post(URL, headers=auth, json=EMBED))
+    assert body["embedding"] == {"status": "fail", "message": "Embedding (OpenAI) returned no usable vector."}
+
+
+def test_embedding_wrong_vector_count_fails(client, auth, chat_models, image_api, embedding_api):
+    embedding_api.response = FakeEmbeddingResponse(vectors=[[0.1], [0.2]])
+    body = results(client.post(URL, headers=auth, json=EMBED))
+    assert body["embedding"] == {
+        "status": "fail", "message": "Embedding (OpenAI): OpenAI returned an unexpected embedding count."}
+
+
+def test_embedding_missing_key_fails_without_network(client, auth, chat_models, image_api,
+                                                     embedding_api):
+    payload = {**FULL, "test_embedding": True, "embedding_provider": "gemini"}
+    body = results(client.post(URL, headers=auth, json=payload))
+    assert body["embedding"] == {"status": "fail",
+                                 "message": "No Gemini API key is configured for embeddings."}
+    assert embedding_api.calls == []
+
+
+def test_embedding_timeout_fails(client, auth, chat_models, image_api, monkeypatch):
+    def slow(*args, **kwargs):
+        import time
+        time.sleep(0.5)
+        return [[0.1]]
+
+    monkeypatch.setattr(checks, "EMBEDDING_CHECK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(embeddings, "embed_texts", slow)
+    body = results(client.post(URL, headers=auth, json=EMBED))
+    assert body["embedding"] == {"status": "fail", "message": "Embedding (OpenAI) did not respond in time."}
+
+
+def test_short_embedding_key_is_rejected_without_echo(client, auth, chat_models, image_api):
+    response = client.post(URL, headers=auth, json={**EMBED, "gemini_embedding_api_key": "short-secret"})
+    assert response.status_code == 422
+    assert "short-secret" not in response.text
+
+
+def test_embedding_reuse_passes_with_the_chat_key(client, auth, chat_models, image_api, embedding_api):
+    saved = client.post("/api/v1/admin/config", headers=auth,
+                        json={"llm_provider": "openai", "llm_model": "m",
+                              "openai_embedding_api_key": EMBED_KEY})
+    assert saved.status_code == 200      # a stored embedding key that reuse must ignore
+    payload = {**FULL, "test_embedding": True, "embedding_provider": "openai",
+               "embedding_reuse_chat_api_key": True}
+    body = results(client.post(URL, headers=auth, json=payload))
+    assert body["embedding"]["status"] == "pass"
+    assert embedding_api.calls[0]["headers"]["Authorization"] == f"Bearer {OPENAI_KEY}"
+
+
+def test_embedding_reuse_mismatch_fails_only_the_embedding_check(client, auth, chat_models,
+                                                                image_api, embedding_api):
+    payload = {**FULL, "test_embedding": True, "embedding_provider": "gemini",
+               "embedding_reuse_chat_api_key": True}
+    response = client.post(URL, headers=auth, json=payload)
+    body = results(response)
+    assert body["embedding"] == {"status": "fail", "message": (
+        "The chat API key can only be reused when chat and embedding providers are the same.")}
+    assert body["llm"]["status"] == "pass" and body["image_generation"]["status"] == "pass"
+    assert embedding_api.calls == []
+
+
+def test_embedding_reuse_with_ollama_fails(client, auth, chat_models, image_api, embedding_api):
+    payload = {**FULL, "llm_provider": "ollama", "test_embedding": True,
+               "embedding_provider": "ollama", "embedding_reuse_chat_api_key": True}
+    body = results(client.post(URL, headers=auth, json=payload))
+    assert body["embedding"] == {"status": "fail", "message": (
+        "The chat API key cannot be reused with Ollama, which uses no API key.")}
+
+
+def test_embedding_reuse_missing_chat_key_fails_without_network(client, auth, chat_models,
+                                                               image_api, embedding_api):
+    payload = {**FULL, "llm_provider": "gemini", "test_embedding": True,
+               "embedding_provider": "gemini", "embedding_reuse_chat_api_key": True,
+               "gemini_embedding_api_key": GEMINI_KEY}   # ignored under reuse
+    response = client.post(URL, headers=auth, json=payload)
+    body = results(response)
+    assert body["embedding"] == {"status": "fail", "message": (
+        "No Gemini chat API key is configured to reuse for embeddings.")}
+    assert embedding_api.calls == []
+    assert GEMINI_KEY not in response.text
+
+
+def test_embedding_reuse_flag_is_ignored_when_env_is_in_charge(client, auth, chat_models,
+                                                               image_api, embedding_api):
+    payload = {**FULL, "test_embedding": True, "embedding_provider": "",
+               "embedding_reuse_chat_api_key": True, "openai_embedding_api_key": EMBED_KEY}
+    body = results(client.post(URL, headers=auth, json=payload))
+    assert body["embedding"]["status"] == "pass"
+    assert embedding_api.calls[0]["headers"]["Authorization"] == f"Bearer {EMBED_KEY}"

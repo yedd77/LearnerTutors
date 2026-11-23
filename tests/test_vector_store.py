@@ -231,3 +231,35 @@ def test_collection_name_changes_with_embedding_identity(monkeypatch):
         __import__("conftest").reset_settings_cache()
         vs.reset_vector_store_cache()
     assert vs.get_collection().name == base
+
+
+def test_collection_follows_a_runtime_embedding_change(runtime_path):
+    """A Moodle embedding change (seen through get_settings) reopens the matching collection."""
+    import json
+
+    from conftest import reset_settings_cache
+
+    first = vs.get_collection().name
+    runtime_path.write_text(json.dumps({"embedding_provider": "ollama", "embedding_model": "nomic-x"}),
+                            encoding="utf-8")
+    reset_settings_cache()
+    switched = vs.get_collection()
+    assert switched.name != first
+    assert switched.metadata["embedding_provider"] == "ollama"
+    assert switched.metadata["embedding_model"] == "nomic-x"
+    runtime_path.unlink()
+    reset_settings_cache()
+    assert vs.get_collection().name == first
+
+
+def test_embedding_key_prefers_moodle_embedding_key_then_chat_key():
+    from app.config import get_settings
+    from app.services.embedding_provider import embedding_api_key
+
+    base = get_settings().model_copy(update={"openai_api_key": "chat-key", "gemini_api_key": "g-chat"})
+    assert embedding_api_key("openai", base) == "chat-key"
+    assert embedding_api_key("gemini", base) == "g-chat"
+    managed = base.model_copy(update={"embedding_openai_api_key": "embed-key"})
+    assert embedding_api_key("openai", managed) == "embed-key"
+    assert embedding_api_key("gemini", managed) == "g-chat"
+    assert embedding_api_key("ollama", managed) == ""

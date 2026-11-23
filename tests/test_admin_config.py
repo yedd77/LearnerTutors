@@ -199,3 +199,217 @@ def test_non_object_runtime_file_does_not_crash_settings(client, auth, runtime_p
     # Moodle can still repair the file through the admin endpoint.
     assert post(client, auth).status_code == 200
     assert config_module.get_settings().llm_model == "chat-model-x"
+
+
+# --------------------------------------------------------------------------- embedding settings
+OPENAI_EMBED_KEY = "sk-test-embed-openai-" + "e" * 30
+GEMINI_EMBED_KEY = "gemini-test-embed-key-" + "f" * 30
+
+
+def test_old_client_payload_keeps_env_embedding_and_no_reindex(client, auth, runtime_path):
+    body = post(client, auth).json()
+    assert (body["embedding_provider"], body["embedding_model"]) == ("openai", "test-embed")
+    assert body["embedding_changed"] is False and body["reindex_required"] is False
+    assert body["openai_embedding_api_key_configured"] is False
+    assert body["gemini_embedding_api_key_configured"] is False
+    data = stored(runtime_path)
+    assert "embedding_provider" not in data and "embedding_model" not in data
+    assert client.get("/api/v1/admin/config", headers=auth).json()["embedding_source"] == "env"
+
+
+def test_embedding_override_round_trip(client, auth):
+    response = post(client, auth, embedding_provider="gemini", embedding_model="  gem-embed-x  ")
+    body = response.json()
+    assert response.status_code == 200
+    assert (body["embedding_provider"], body["embedding_model"]) == ("gemini", "gem-embed-x")
+    reset_settings_cache()
+    settings = config_module.get_settings()
+    assert (settings.embedding_provider, settings.resolved_embedding_model) == ("gemini", "gem-embed-x")
+    read = client.get("/api/v1/admin/config", headers=auth).json()
+    assert read["embedding_source"] == "moodle"
+    assert (read["embedding_provider"], read["resolved_embedding_model"]) == ("gemini", "gem-embed-x")
+
+
+def test_blank_embedding_model_uses_the_provider_default(client, auth, configure):
+    configure(GEMINI_EMBED_MODEL="gemini-default-embed")
+    body = post(client, auth, embedding_provider="gemini", embedding_model="").json()
+    assert body["embedding_model"] == "gemini-default-embed"
+
+
+def test_blank_embedding_provider_restores_env_values(client, auth, runtime_path):
+    post(client, auth, embedding_provider="ollama", embedding_model="nomic-x")
+    body = post(client, auth, embedding_provider="", embedding_model="ignored").json()
+    assert (body["embedding_provider"], body["embedding_model"]) == ("openai", "test-embed")
+    assert body["reindex_required"] is True          # ollama:nomic-x -> back to .env identity
+    assert "embedding_provider" not in stored(runtime_path)
+    reset_settings_cache()
+    assert config_module.get_settings().embedding_provider == "openai"
+    assert client.get("/api/v1/admin/config", headers=auth).json()["embedding_source"] == "env"
+
+
+@pytest.mark.parametrize("change", [
+    {"embedding_provider": "gemini"},
+    {"embedding_provider": "openai", "embedding_model": "text-embedding-3-large"},
+])
+def test_identity_change_requires_reindex(client, auth, change):
+    body = post(client, auth, **change).json()
+    assert body["embedding_changed"] is True and body["reindex_required"] is True
+
+
+def test_same_identity_does_not_require_reindex(client, auth):
+    # The explicit selection equals the .env identity (openai + its default model).
+    body = post(client, auth, embedding_provider="openai", embedding_model="test-embed").json()
+    assert body["reindex_required"] is False
+    again = post(client, auth, embedding_provider="openai", embedding_model="").json()
+    assert again["reindex_required"] is False
+
+
+def test_key_only_change_does_not_require_reindex(client, auth):
+    post(client, auth, embedding_provider="gemini", embedding_model="gem-embed")
+    body = post(client, auth, embedding_provider="gemini", embedding_model="gem-embed",
+                gemini_embedding_api_key=GEMINI_EMBED_KEY).json()
+    assert body["reindex_required"] is False and body["embedding_changed"] is False
+    assert body["gemini_embedding_api_key_configured"] is True
+
+
+def test_chat_or_image_change_does_not_require_reindex(client, auth):
+    post(client, auth, embedding_provider="gemini")
+    body = post(client, auth, embedding_provider="gemini", llm_model="other-chat",
+                image_model="img-2").json()
+    assert body["reindex_required"] is False
+
+
+def test_embedding_identity_tags_only_gemini_dimensions():
+    base = config_module.get_settings()
+    gemini = base.model_copy(update={"embedding_provider": "gemini", "embedding_model": "g"})
+    assert gemini.embedding_identity == f"gemini:g:{base.gemini_embed_dimensions}"
+    assert gemini.model_copy(update={"gemini_embed_dimensions": 1536}).embedding_identity == "gemini:g:1536"
+    openai = base.model_copy(update={"gemini_embed_dimensions": 1536})
+    assert openai.embedding_identity == "openai:test-embed:default"
+
+
+def test_embedding_keys_are_encrypted_and_separate(client, auth, runtime_path):
+    post(client, auth, openai_api_key=OPENAI_KEY, openai_embedding_api_key=OPENAI_EMBED_KEY,
+         gemini_embedding_api_key=GEMINI_EMBED_KEY)
+    raw = runtime_path.read_text(encoding="utf-8")
+    assert OPENAI_EMBED_KEY not in raw and GEMINI_EMBED_KEY not in raw
+    data = stored(runtime_path)
+    assert decrypt(data["embedding_provider_api_keys"]["openai"]) == OPENAI_EMBED_KEY
+    assert decrypt(data["embedding_provider_api_keys"]["gemini"]) == GEMINI_EMBED_KEY
+    reset_settings_cache()
+    settings = config_module.get_settings()
+    assert settings.embedding_openai_api_key == OPENAI_EMBED_KEY
+    assert settings.openai_api_key == OPENAI_KEY
+    read = client.get("/api/v1/admin/config", headers=auth)
+    assert OPENAI_EMBED_KEY not in read.text and GEMINI_EMBED_KEY not in read.text
+    assert read.json()["openai_embedding_api_key_configured"] is True
+
+
+def test_embedding_key_blank_keeps_and_clear_flag_removes(client, auth, runtime_path):
+    post(client, auth, openai_embedding_api_key=OPENAI_EMBED_KEY, gemini_embedding_api_key=GEMINI_EMBED_KEY)
+    before = stored(runtime_path)["embedding_provider_api_keys"]["openai"]
+    post(client, auth, openai_embedding_api_key="   ")
+    assert stored(runtime_path)["embedding_provider_api_keys"]["openai"] == before
+    body = post(client, auth, clear_openai_embedding_api_key=True).json()
+    keys = stored(runtime_path)["embedding_provider_api_keys"]
+    assert "openai" not in keys and "gemini" in keys
+    assert body["openai_embedding_api_key_configured"] is False
+    post(client, auth, gemini_embedding_api_key=GEMINI_EMBED_KEY, clear_gemini_embedding_api_key=True)
+    assert stored(runtime_path)["embedding_provider_api_keys"] == {}
+
+
+@pytest.mark.parametrize("field", ["openai_embedding_api_key", "gemini_embedding_api_key"])
+@pytest.mark.parametrize("bad_key", ["short", "x" * 513])
+def test_embedding_key_length_is_validated_without_echo(client, auth, field, bad_key):
+    response = post(client, auth, **{field: bad_key})
+    assert response.status_code == 422
+    assert bad_key not in response.text
+
+
+@pytest.mark.parametrize("fields", [
+    {"embedding_provider": "mistral"},
+    {"embedding_model": "m" * 161},
+])
+def test_invalid_embedding_selection_is_rejected(client, auth, fields):
+    assert post(client, auth, **fields).status_code == 422
+
+
+def test_unknown_stored_embedding_provider_is_ignored(runtime_path):
+    runtime_path.write_text(json.dumps({"embedding_provider": "evil", "embedding_model": "x"}),
+                            encoding="utf-8")
+    reset_settings_cache()
+    settings = config_module.get_settings()
+    assert (settings.embedding_provider, settings.resolved_embedding_model) == ("openai", "test-embed")
+
+
+# --------------------------------------------------------------------------- embedding chat-key reuse
+from app.services.embedding_provider import embedding_api_key  # noqa: E402
+
+MISMATCH = "The chat API key can only be reused when chat and embedding providers are the same."
+OLLAMA = "The chat API key cannot be reused with Ollama, which uses no API key."
+
+
+def test_embedding_reuse_round_trip(client, auth, runtime_path):
+    body = post(client, auth, embedding_provider="openai", embedding_reuse_chat_api_key=True).json()
+    assert body["embedding_reuse_chat_api_key"] is True
+    assert stored(runtime_path)["embedding_reuse_chat_api_key"] is True
+    reset_settings_cache()
+    assert config_module.get_settings().embedding_reuse_chat_api_key is True
+    read = client.get("/api/v1/admin/config", headers=auth).json()
+    assert read["embedding_reuse_chat_api_key"] is True
+
+
+def test_embedding_reuse_uses_chat_key_even_with_a_stored_embedding_key(client, auth):
+    post(client, auth, embedding_provider="openai", openai_api_key=OPENAI_KEY,
+         openai_embedding_api_key=OPENAI_EMBED_KEY, embedding_reuse_chat_api_key=True)
+    reset_settings_cache()
+    settings = config_module.get_settings()
+    assert settings.embedding_openai_api_key == OPENAI_EMBED_KEY      # kept, but not used
+    assert embedding_api_key("openai", settings) == OPENAI_KEY
+
+
+def test_without_embedding_reuse_the_stored_embedding_key_is_used(client, auth):
+    post(client, auth, embedding_provider="openai", openai_api_key=OPENAI_KEY,
+         openai_embedding_api_key=OPENAI_EMBED_KEY)
+    reset_settings_cache()
+    assert embedding_api_key("openai", config_module.get_settings()) == OPENAI_EMBED_KEY
+
+
+@pytest.mark.parametrize("fields, message", [
+    ({"llm_provider": "openai", "embedding_provider": "gemini"}, MISMATCH),
+    ({"llm_provider": "ollama", "embedding_provider": "openai"}, OLLAMA),
+    ({"llm_provider": "ollama", "embedding_provider": "ollama"}, OLLAMA),
+    ({"llm_provider": "openai", "embedding_provider": "ollama"}, OLLAMA),
+])
+def test_invalid_embedding_reuse_is_422_and_writes_nothing(client, auth, runtime_path, fields, message):
+    response = post(client, auth, embedding_reuse_chat_api_key=True, **fields)
+    assert response.status_code == 422
+    assert response.json()["detail"] == message
+    assert not runtime_path.exists()
+
+
+def test_embedding_reuse_is_ignored_when_env_is_in_charge(client, auth, runtime_path):
+    # Mismatched providers would be a 422, but with embedding_provider="" the flag is moot.
+    response = post(client, auth, llm_provider="ollama", embedding_provider="",
+                    embedding_reuse_chat_api_key=True)
+    assert response.status_code == 200
+    assert response.json()["embedding_reuse_chat_api_key"] is False
+    assert stored(runtime_path)["embedding_reuse_chat_api_key"] is False
+
+
+def test_toggling_only_embedding_reuse_does_not_require_reindex(client, auth):
+    post(client, auth, embedding_provider="openai", embedding_model="e1")
+    on = post(client, auth, embedding_provider="openai", embedding_model="e1",
+              embedding_reuse_chat_api_key=True).json()
+    off = post(client, auth, embedding_provider="openai", embedding_model="e1").json()
+    for body in (on, off):
+        assert body["reindex_required"] is False and body["embedding_changed"] is False
+    assert (on["embedding_reuse_chat_api_key"], off["embedding_reuse_chat_api_key"]) == (True, False)
+
+
+def test_old_client_payload_reports_embedding_reuse_off(client, auth, runtime_path):
+    body = post(client, auth).json()
+    assert body["embedding_reuse_chat_api_key"] is False
+    assert stored(runtime_path)["embedding_reuse_chat_api_key"] is False
+    reset_settings_cache()
+    assert config_module.get_settings().embedding_reuse_chat_api_key is False

@@ -51,9 +51,9 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"                    
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"  # RUNTIME_CONFIG_ENCRYPTION_KEY
 ```
 
-**Chat provider, model and keys come from Moodle** (Site administration → Plugins → Local plugins → Course Learning Assistant). See [docs/PROVIDER_CREDENTIALS.md](docs/PROVIDER_CREDENTIALS.md). `OPENAI_API_KEY` and `GEMINI_API_KEY` in `.env` are only fallbacks; a key saved in Moodle takes precedence. Embeddings use the same key for their provider, so an OpenAI embedding setup needs an OpenAI key saved in Moodle or in `.env`.
+**Chat provider, model and keys come from Moodle** (Site administration → Plugins → Local plugins → Course Learning Assistant). See [docs/PROVIDER_CREDENTIALS.md](docs/PROVIDER_CREDENTIALS.md). `OPENAI_API_KEY` and `GEMINI_API_KEY` in `.env` are only fallbacks; a key saved in Moodle takes precedence. Embeddings use the embedding key saved in Moodle for their provider; without one they use the chat key for that provider (Moodle, then `.env`).
 
-**Changing the embedding provider or model is a migration, not a setting.** Each embedding model has its own Chroma collection, because vectors from different models can't be compared. After a change, every document must be re-indexed before it can be found again. The old collection stays on disk, so switching back makes it usable again. The embedding model is deliberately configurable only in `.env`, not from Moodle.
+**Changing the embedding provider or model is a migration, not a setting.** Each embedding model has its own Chroma collection, because vectors from different models can't be compared. After a change, every document must be re-indexed before it can be found again. The old collection stays on disk, so switching back makes it usable again. `EMBEDDING_PROVIDER`/`EMBEDDING_MODEL` in `.env` are the defaults; Moodle can override them, and the backend then reports `reindex_required: true` so Moodle queues a full reindex.
 
 ### Optional settings (defaults shown)
 

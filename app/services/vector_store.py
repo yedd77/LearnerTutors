@@ -16,16 +16,18 @@ from app.services.embedding_provider import embed_texts
 
 _client = None
 _collection = None
+_collection_identity = None     # embedding identity the open collection belongs to
 _retrieval_metadata_migrated = False 
 _lock = threading.Lock()
 logger = logging.getLogger(__name__)
 
 def reset_vector_store_cache() -> None:
     """Reopen Chroma on the next operation after embedding configuration changes."""
-    global _client, _collection, _retrieval_metadata_migrated
+    global _client, _collection, _collection_identity, _retrieval_metadata_migrated
     with _lock:
         _client = None
         _collection = None
+        _collection_identity = None
         _retrieval_metadata_migrated = False
 
 
@@ -35,13 +37,22 @@ class DocumentCourseConflictError(ValueError):
 
 # Return the persistent ChromaDB collection, initializing it if necessary.
 def get_collection():
-    """Return the persistent ChromaDB collection."""
-    global _client, _collection, _retrieval_metadata_migrated
+    """Return the persistent ChromaDB collection for the active embedding identity.
+
+    Moodle can change the embedding provider/model at runtime, and every worker
+    notices through ``get_settings()``; the collection is reopened when the
+    identity no longer matches the one it was opened for.
+    """
+    global _client, _collection, _collection_identity, _retrieval_metadata_migrated
 
     with _lock:
+        settings = get_settings()
+        if _collection is not None and _collection_identity != settings.embedding_identity:
+            logger.info("Chroma collection switch: embedding configuration changed.")
+            _collection = None
+            _retrieval_metadata_migrated = False
         if _collection is None:
             initialization_started = time.perf_counter()
-            settings = get_settings()
             _client = chromadb.PersistentClient(
                 path=settings.chroma_absolute_path
             )
@@ -49,8 +60,7 @@ def get_collection():
             # models are never compared against one another.
             embedding_provider = settings.embedding_provider.lower()
             embedding_model = settings.resolved_embedding_model
-            dimension_tag = str(settings.gemini_embed_dimensions) if embedding_provider == "gemini" else "default"
-            identity = f"{embedding_provider}:{embedding_model}:{dimension_tag}"
+            identity = settings.embedding_identity
             suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8]
             model_slug = re.sub(r"[^a-zA-Z0-9_]", "_", embedding_model)[:16].strip("_")
             collection_name = f"{settings.chroma_collection[:25]}_{embedding_provider}_{model_slug}_{suffix}"[:63]
@@ -62,6 +72,7 @@ def get_collection():
                     "embedding_model": embedding_model,
                 },
             )
+            _collection_identity = identity
             logger.info(
                 "Chroma collection opened name=%s provider=%s model=%s duration_ms=%.2f",
                 collection_name,
