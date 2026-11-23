@@ -100,15 +100,6 @@ TOOLS: dict[str, ToolDefinition] = {
         top_k=10,
         aliases=("study guide", "revision plan"),
     ),
-    "exact_text_extraction": ToolDefinition(
-        id="exact_text_extraction",
-        label="Extract exact text",
-        description="Extract or quote text from supplied source material.",
-        prompt_file="exact_text_extraction.md",
-        command="/extract",
-        retrieval_mode="course_rag",
-        aliases=("exact text", "verbatim", "quote exactly"),
-    ),
 }
 
 # Return a supported tool; reject unknown IDs

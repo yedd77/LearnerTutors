@@ -141,14 +141,14 @@ async def rewrite_query(state: RagState, runtime: Runtime[RagContext]) -> dict:
     """Choose the search text for this attempt.
 
     The first turn uses the question as-is; follow-ups are condensed with the
-    history and retries are reworded by the LLM. Exact-text extraction is never
-    rewritten. The result is used only for search, never for generation.
+    history and retries are reworded by the LLM. The result is used only for
+    search, never for generation.
     """
     question = state["question"]
     attempts = state.get("attempts", 0)
     history = state.get("history", [])
-    # Exact extraction must search the user's own wording; first turns need no rewrite.
-    if state["route"].tool.id == "exact_text_extraction" or (attempts == 0 and not history):
+    # First turns need no rewrite.
+    if attempts == 0 and not history:
         return {"search_query": question, "next_step": "retrieve"}
 
     ctx = runtime.context
@@ -216,8 +216,8 @@ def grade_matches(matches: list[dict], settings: Settings, request_id: str) -> l
 async def grade(state: RagState, runtime: Runtime[RagContext]) -> dict:
     """Keep relevant chunks and choose the next step: generate, retry, or no_context.
 
-    A retry only happens when chunks existed but none were close enough, the
-    attempt budget allows it, and the tool is not exact-text extraction.
+    A retry only happens when chunks existed but none were close enough and the
+    attempt budget allows it.
     """
     ctx = runtime.context
     settings = get_settings()
@@ -231,7 +231,6 @@ async def grade(state: RagState, runtime: Runtime[RagContext]) -> dict:
         next_step = "study_sheet" if sheets.is_notes(state["route"].tool.id) else "generate"
     elif (
         state.get("retrieved_raw", 0) > 0                      # something exists, just not close enough
-        and state["route"].tool.id != "exact_text_extraction"
         and state.get("attempts", 0) < max_attempts(settings)
     ):
         next_step = "rewrite_query"

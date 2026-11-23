@@ -212,13 +212,6 @@ def test_follow_up_is_rewritten_with_history(client, auth, stub_generation, aux,
     assert stub_generation.calls[0]["route"].question == "and where does it happen?"
 
 
-def test_exact_extraction_never_rewrites(client, auth, stub_generation, aux, searches):
-    index_text("bio", BIO)
-    ask(client, auth, "Quote the text about photosynthesis verbatim", history=HISTORY)
-    assert aux.structured_calls == []
-    assert searches[0]["query"] == "Quote the text about photosynthesis verbatim"
-
-
 def test_generation_error_is_502(client, auth, stub_generation, aux):
     index_text("bio", BIO)
     stub_generation.error = ProviderError("gemini returned HTTP 503: overloaded")

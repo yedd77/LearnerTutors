@@ -224,6 +224,13 @@ def test_unknown_tool_id_is_422(client, auth, stub_generation):
     assert "Unsupported tool_id" in response.json()["detail"]
 
 
+def test_removed_extract_tool_id_is_422(client, auth, stub_generation):
+    # This tool was removed; old clients get a clean 422, not a 500.
+    response = ask(client, auth, tool_id="exact_text_extraction")
+    assert response.status_code == 422
+    assert "Unsupported tool_id" in response.json()["detail"]
+
+
 def test_explicit_tool_id_is_honoured(client, auth, stub_generation, bio):
     ask(client, auth, "make something", tool_id="flashcards")
     assert stub_generation.calls[0]["route"].tool.id == "flashcards"

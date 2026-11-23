@@ -17,13 +17,6 @@ class RouteResult:
 # Natural-language patterns, checked in order against the lower-cased message.
 # The first tool with a matching pattern wins; nothing matching means "ask".
 _PATTERN_ROUTES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("exact_text_extraction", (
-        r"\bverbatim\b",
-        r"\bexact wording\b",
-        r"\bquote (?:this|the following|the text)\b",
-        r"\bextract (?:the exact|verbatim)\b",
-        r"\bcopy .+ exactly\b",
-    )),
     ("exam_generation", (
         r"\b(?:create|generate|make|write|prepare|design)\b.{0,70}"
         r"\b(?:exam questions?|examination questions?|mock exam|exam paper|"

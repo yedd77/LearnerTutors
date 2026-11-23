@@ -211,7 +211,7 @@ When `result.pending_action` is present and `type === "expand_notes_search"`:
 5. A file past `expires_at` (or after the backend deleted it) → the inline
    "expired" notice, no broken download and no raw error page.
 6. `/ask`, `/exam`, `/summarize`, `/flashcards`, `/explain` (with illustration),
-   `/quiz`, `/studyguide` and `/extract` render exactly as before.
+   `/quiz` and `/studyguide` render exactly as before.
 7. Mobile width (about 375px): the buttons are full-width and usable.
 8. No backend URL, API key or `user_id` parameter appears in the browser's network tab.
 

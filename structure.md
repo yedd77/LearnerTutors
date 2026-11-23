@@ -40,8 +40,8 @@ LearnerTutors/
 |   |
 |   |-- prompts/
 |   |   |-- core/               instructions.md, grounding.md, answer_format.md
-|   |   |-- tools/              ask, concept_explanation, exact_text_extraction, exam_generation,
-|   |   |                       flashcards, note_making, practice_quiz, study_guide, summarization
+|   |   |-- tools/              ask, concept_explanation, exam_generation, flashcards,
+|   |   |                       note_making, practice_quiz, study_guide, summarization
 |   |   `-- graph/              classify.md, rewrite.md, conversational.md
 |   |
 |   `-- services/
@@ -158,7 +158,6 @@ START → classify ─conversational─► conversational_reply ─────�
 - **conversational_reply:** a short reply from `prompts/graph/conversational.md`, which refuses academic content. There is no retrieval and no sources.
 - **rewrite_query:**
   - First turns are not rewritten. Follow-ups with history are condensed into a standalone query, and retries are rewritten with different wording.
-  - Exact-text extraction is never rewritten.
   - The rewritten text is used only for search. Generation always uses the original question.
 - **retrieve:** calls `vector_store.search_course` on the retrieval thread pool, using the scope from `RagContext`.
 - **grade:**

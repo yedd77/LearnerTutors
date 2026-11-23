@@ -19,7 +19,6 @@ def test_exam_command():
     ("/explain", "concept_explanation"),
     ("/quiz", "practice_quiz"),
     ("/studyguide", "study_guide"),
-    ("/extract", "exact_text_extraction"),
 ])
 def test_every_slash_command_routes_to_its_tool(command, tool_id):
     result = route_message(f"{command} cell division")
@@ -58,8 +57,9 @@ def test_command_without_text_leaves_empty_question():
     ("quiz me on cell biology", "practice_quiz"),
     ("I need a study guide for the midterm", "study_guide"),
     ("explain osmosis to me", "concept_explanation"),
-    ("what is the exact wording of the definition?", "exact_text_extraction"),
-    ("quote the following text verbatim", "exact_text_extraction"),
+    # Quoting/verbatim wording has no dedicated tool; it falls through to the default.
+    ("what is the exact wording of the definition?", "ask"),
+    ("quote the following text verbatim", "ask"),
     ("what is osmosis?", "ask"),
 ])
 def test_natural_language_routing(message, tool_id):

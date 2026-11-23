@@ -77,7 +77,7 @@ def test_bundle_has_core_system_message_and_filled_user_message():
 
 
 @pytest.mark.parametrize("command", [
-    "/exam", "/notes", "/summarize", "/flashcards", "/explain", "/quiz", "/studyguide", "/extract",
+    "/exam", "/notes", "/summarize", "/flashcards", "/explain", "/quiz", "/studyguide",
 ])
 def test_every_tool_template_fills_all_placeholders(command):
     route = route_message(f"{command} topic")
