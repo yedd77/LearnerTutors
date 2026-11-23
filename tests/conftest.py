@@ -3,7 +3,8 @@
 Safety rules enforced here:
   * Environment overrides are applied BEFORE `app` is imported, so values from the
     developer's real `.env` (provider keys, RAG_API_KEY, ...) are never used.
-  * Chroma, the runtime config file and the illustration directory all live in
+  * Chroma, the runtime config file, the illustration and generated-file
+    directories all live in
     temporary locations. The real `storage/` directory is never touched.
   * Provider calls (embeddings, chat generation, images) are stubbed. No network.
 """
@@ -66,6 +67,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import app.api.admin as admin_module  # noqa: E402
 import app.config as config_module  # noqa: E402
 import app.services.illustrations as illustrations_module  # noqa: E402
+import app.services.temp_files as temp_files_module  # noqa: E402
 import app.services.vector_store as vector_store  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
 
@@ -123,6 +125,7 @@ def isolated_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(config_module, "RUNTIME_CONFIG_PATH", runtime_path)
     monkeypatch.setattr(admin_module, "RUNTIME_CONFIG_PATH", runtime_path)
     monkeypatch.setattr(illustrations_module, "IMAGE_DIR", tmp_path / "illustrations")
+    monkeypatch.setattr(temp_files_module, "GENERATED_DIR", tmp_path / "generated")
     reset_settings_cache()
     yield runtime_path
     reset_settings_cache()

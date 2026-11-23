@@ -13,6 +13,7 @@ class RagState(TypedDict, total=False):
     question: str                 # original question, after command stripping
     history: list[dict[str, str]]
     route: RouteResult
+    expanded: bool                # /notes: student approved a wider search (larger top_k, same course)
     intent: Literal["conversational", "course_question"]
     classified_by: str            # router | heuristic | llm | fallback
     search_query: str             # text used for retrieval only, never for generation
@@ -25,6 +26,8 @@ class RagState(TypedDict, total=False):
     sources: list[SourceItem]
     answer: str
     validation: dict[str, Any] | None   # filled by the grounding validator (later track)
-    outcome: Literal["answered", "no_context", "conversational"]
+    study_sheet: Any              # /notes: StudySheet content; the endpoint renders the PDF
+    outcome: Literal["answered", "no_context", "conversational",
+                     "study_sheet", "needs_expansion", "insufficient"]
     trace: Annotated[list[str], operator.add]
     llm_calls: Annotated[int, operator.add]

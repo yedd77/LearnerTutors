@@ -13,7 +13,7 @@ from app.config import apply_tracing_policy, get_settings
 # Disable LangSmith tracing before any LangChain module is imported or used.
 apply_tracing_policy()
 
-from app.api import admin, chat, documents, illustrations  # noqa: E402
+from app.api import admin, chat, documents, downloads, illustrations  # noqa: E402
 
 # Configure application logging before importing/serving requests.
 s = get_settings()
@@ -58,11 +58,30 @@ async def warm_vector_store():
         # not_ready and the first retrieval attempt will surface the same error.
 
 
+async def sweep_generated_files():
+    """Delete expired temporary files (study sheet PDFs) now and then every few minutes."""
+    from app.services.temp_files import cleanup_expired
+
+    while True:
+        try:
+            await asyncio.to_thread(cleanup_expired)
+        except Exception:
+            request_logger.exception("generated_files.cleanup_failed")
+        await asyncio.sleep(max(30, get_settings().generated_files_cleanup_seconds))
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Warm up Chroma before serving traffic; stop the retrieval thread pool on shutdown."""
+    """Warm up Chroma before serving traffic, sweep expired generated files in the
+    background, and stop the sweeper and the retrieval thread pool on shutdown."""
     await warm_vector_store()
+    sweeper = asyncio.create_task(sweep_generated_files())
     yield
+    sweeper.cancel()
+    try:
+        await sweeper
+    except asyncio.CancelledError:
+        pass
     from app.services.retrieval import shutdown_retrieval_executor
 
     stopped = shutdown_retrieval_executor()
@@ -83,6 +102,7 @@ app.include_router(admin.router, prefix="/api/v1")
 app.include_router(documents.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
 app.include_router(illustrations.router, prefix="/api/v1")
+app.include_router(downloads.router, prefix="/api/v1")
 
 
 @app.middleware("http")

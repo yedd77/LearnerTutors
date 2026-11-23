@@ -1,6 +1,6 @@
 """Pydantic request and response models for the public API."""
 from typing import Literal
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
 class ChatHistoryMessage(BaseModel):
     """One earlier turn of the conversation, as sent by Moodle."""
@@ -28,6 +28,10 @@ class ChatRequest(BaseModel):
     # unavailable (429, 5xx, timeout, connection error). Send both or neither.
     fallback_provider: Literal["openai", "gemini", "ollama"] | None = None
     fallback_model: str | None = Field(default=None, max_length=160)
+    # Answer to an earlier ``pending_action`` (e.g. "widen the /notes search?").
+    # Only this explicit pair counts as consent; a free-text "yes" is a normal message.
+    pending_action_token: str | None = Field(default=None, max_length=4096)
+    pending_decision: Literal["approve", "decline"] | None = None
 
     @field_validator("question")
     @classmethod
@@ -54,6 +58,8 @@ class ChatRequest(BaseModel):
             self.fallback_model = self.fallback_model.strip() or None
         if (self.fallback_provider is None) != (self.fallback_model is None):
             raise ValueError("Send both fallback_provider and fallback_model, or neither.")
+        if (self.pending_action_token is None) != (self.pending_decision is None):
+            raise ValueError("Send both pending_action_token and pending_decision, or neither.")
         return self
 
 
@@ -74,6 +80,46 @@ class ChatResponse(BaseModel):
     retrieved_chunks: int = 0
     retrieved_contexts: list[str] = Field(default_factory=list)
     illustration_url: str | None = None
+    # Set when a downloadable file (e.g. a /notes study sheet PDF) was generated.
+    download: "DownloadItem | None" = None
+    # Set when the assistant needs the student's explicit approval to continue.
+    pending_action: "PendingAction | None" = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_extras(self, handler):
+        """Leave ``download``/``pending_action`` out when unset, so every other reply
+        is serialised exactly as before these fields existed."""
+        data = handler(self)
+        for key in ("download", "pending_action"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
+class DownloadItem(BaseModel):
+    """A temporary generated file. Moodle fetches it from
+    ``GET /api/v1/generated-files/{file_id}?course_id=..&user_id=..`` with the API key."""
+    file_id: str
+    filename: str
+    content_type: str = "application/pdf"
+    expires_at: int          # Unix time; the file is deleted after this
+    ttl_minutes: int
+    pages: int
+
+
+class PendingAction(BaseModel):
+    """A question the student must explicitly approve or decline.
+
+    Send ``token`` back as ``pending_action_token`` with ``pending_decision``.
+    """
+    type: Literal["expand_notes_search"]
+    token: str
+    expires_at: int
+    approve_label: str
+    decline_label: str
+
+
+ChatResponse.model_rebuild()  # resolve the forward references above
 
 
 class IndexResponse(BaseModel):

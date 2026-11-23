@@ -94,6 +94,19 @@ class Settings(BaseSettings):
     # classify/rewrite LLM calls, after which the graph falls back to defaults.
     rag_max_retrieval_attempts: int = 2
     rag_aux_timeout_seconds: float = 20
+    # /notes study sheets. A sheet is generated only when at least this many
+    # relevant chunks and characters were retrieved; otherwise the student is
+    # asked before the search is widened to notes_expanded_top_k chunks (capped
+    # at 20, still within the same course).
+    notes_min_chunks: int = 3
+    notes_min_context_chars: int = 1200
+    notes_expanded_top_k: int = 20
+    # Generated files (study sheet PDFs) are temporary: deleted after this many
+    # minutes. Expired files are swept every generated_files_cleanup_seconds.
+    study_sheet_ttl_minutes: int = 60
+    generated_files_cleanup_seconds: int = 300
+    # How long a "widen the search?" confirmation stays valid.
+    pending_action_ttl_minutes: int = 30
     retrieval_workers: int = 64
     chunk_size: int = 900
     chunk_overlap: int = 150

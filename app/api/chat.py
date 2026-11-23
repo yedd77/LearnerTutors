@@ -7,12 +7,13 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
-from app.schemas import ChatRequest, ChatResponse
+from app.schemas import ChatRequest, ChatResponse, DownloadItem, PendingAction
 from app.security import RequireApiKey
-from app.services import llm_provider
+from app.services import llm_provider, pending_actions, temp_files
+from app.services import study_sheet as sheets
 from app.services.llm_provider import ProviderError
 from app.services.illustrations import generate_illustration_async
-from app.prompt_registry import get_tool_menu
+from app.prompt_registry import get_tool, get_tool_menu
 from app.prompt_router import RouteResult, route_message
 from app.rag_graph.context import RagContext
 from app.rag_graph.graph import run_rag_graph
@@ -88,6 +89,71 @@ async def _illustrate(route: RouteResult, question: str, answer: str, context: s
     return url
 
 
+def _resolve_pending(request: ChatRequest, request_id: str) -> RouteResult | str:
+    """Answer to a widen-search question: the route to re-run, or the reply to send.
+
+    Approval re-runs the question stored in the signed token, never the request
+    text, so only the original /notes request can be repeated, and only for its
+    own course and user. Decline, or an invalid/expired token, returns a reply.
+    """
+    try:
+        pending = pending_actions.verify(request.pending_action_token or "", sheets.EXPAND_ACTION,
+                                         course_id=request.course_id, user_id=request.user_id)
+    except pending_actions.PendingActionError as exc:
+        logger.info("chat.pending.invalid id=%s reason=%s", request_id, exc)
+        return sheets.expired_request_message()
+    if not sheets.is_notes(pending.tool_id):
+        logger.warning("chat.pending.invalid id=%s reason=unexpected_tool", request_id)
+        return sheets.expired_request_message()
+    if request.pending_decision != "approve":
+        logger.info("chat.pending.declined id=%s", request_id)
+        return sheets.declined_message()
+    logger.info("chat.pending.approved id=%s", request_id)
+    return RouteResult(tool=get_tool(pending.tool_id), question=pending.question,
+                       explicit_command=True)
+
+
+async def _study_sheet_response(result: dict, request: ChatRequest, request_id: str,
+                                request_started: float) -> ChatResponse:
+    """Render the study sheet PDF, store it temporarily and describe the download.
+
+    Rendering is CPU-bound, so it runs in a worker thread. A rendering or
+    storage failure returns a polite message instead of an error.
+    """
+    from app.pdf.study_sheet import render_study_sheet
+
+    settings = get_settings()
+    sheet, sources = result["study_sheet"], result["sources"]
+    matches = result.get("matches", [])
+    ttl_minutes = max(1, settings.study_sheet_ttl_minutes)
+    started = time.perf_counter()
+    try:
+        rendered = await asyncio.to_thread(render_study_sheet, sheet, sources)
+        stored = await asyncio.to_thread(
+            temp_files.store, rendered.pdf, course_id=request.course_id,
+            user_id=request.user_id, filename=f"{sheet.title} study sheet",
+            ttl_seconds=ttl_minutes * 60,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("chat.study_sheet.render_failed id=%s", request_id)
+        return ChatResponse(answer=sheets.render_failed_message(), sources=[])
+    logger.info("chat.study_sheet.ready id=%s pages=%s scale=%.2f render_ms=%.2f total_ms=%.2f",
+                request_id, rendered.pages, rendered.scale,
+                (time.perf_counter() - started) * 1000,
+                (time.perf_counter() - request_started) * 1000)
+    return ChatResponse(
+        answer=sheets.ready_message(ttl_minutes, rendered.pages),
+        sources=sources,
+        retrieved_chunks=len(matches),
+        retrieved_contexts=[match["text"] for match in matches],
+        download=DownloadItem(file_id=stored.file_id, filename=stored.filename,
+                              content_type=stored.content_type, expires_at=stored.expires_at,
+                              ttl_minutes=ttl_minutes, pages=rendered.pages),
+    )
+
+
 @router.post("", response_model=ChatResponse)
 async def ask(request: ChatRequest, http_request: Request):
     """Answer a student's message from the course documents via the RAG graph.
@@ -95,7 +161,10 @@ async def ask(request: ChatRequest, http_request: Request):
     Steps: route to a prompt tool (422 if a slash command has no text), run the
     graph with the request's access scope and Moodle-selected model, and add an
     illustration for ``/explain`` when the model judges one helpful. Conversational and no-context replies return
-    no sources. Errors: 502 provider failure, 422 invalid input, 500 otherwise.
+    no sources. ``/notes`` returns a study sheet PDF as ``download``, or a
+    ``pending_action`` asking to widen a thin search; the reply to that action
+    arrives as ``pending_action_token`` + ``pending_decision``.
+    Errors: 502 provider failure, 422 invalid input, 500 otherwise.
     """
     settings = get_settings()
     request_id = getattr(http_request.state, "request_id", "unknown")
@@ -112,19 +181,27 @@ async def ask(request: ChatRequest, http_request: Request):
     )
 
     try:
-        route_started = time.perf_counter()
-        route = route_message(
-            request.question,
-            requested_tool_id=request.tool_id,
-        )
+        expanded = False
+        if request.pending_decision is not None:
+            # The student answered an earlier "widen the /notes search?" question.
+            route = _resolve_pending(request, request_id)
+            if isinstance(route, str):
+                return ChatResponse(answer=route, sources=[])
+            expanded = True
+        else:
+            route_started = time.perf_counter()
+            route = route_message(
+                request.question,
+                requested_tool_id=request.tool_id,
+            )
+            logger.info(
+                "chat.route id=%s tool=%s explicit=%s duration_ms=%.2f",
+                request_id,
+                route.tool.id,
+                route.explicit_command,
+                (time.perf_counter() - route_started) * 1000,
+            )
         question = route.question.strip()
-        logger.info(
-            "chat.route id=%s tool=%s explicit=%s duration_ms=%.2f",
-            request_id,
-            route.tool.id,
-            route.explicit_command,
-            (time.perf_counter() - route_started) * 1000,
-        )
         if not question:
             raise HTTPException(
                 status_code=422,
@@ -144,10 +221,27 @@ async def ask(request: ChatRequest, http_request: Request):
             fallback_provider=request.fallback_provider,
             fallback_model=request.fallback_model,
         )
-        result = await run_rag_graph(route=route, history=history, context=rag_context)
+        result = await run_rag_graph(route=route, history=history, context=rag_context,
+                                     expanded=expanded)
         answer = result["answer"]
         matches = result.get("matches", [])
         context = result.get("context", "")
+        if result.get("outcome") == "study_sheet":
+            return await _study_sheet_response(result, request, request_id, request_started)
+        if result.get("outcome") == "needs_expansion":
+            token, expires_at = pending_actions.issue(
+                sheets.EXPAND_ACTION, course_id=request.course_id, user_id=request.user_id,
+                question=question, tool_id=route.tool.id,
+            )
+            logger.info("chat.finish id=%s outcome=needs_expansion total_ms=%.2f", request_id,
+                        (time.perf_counter() - request_started) * 1000)
+            return ChatResponse(
+                answer=answer, sources=[], retrieved_chunks=0, retrieved_contexts=[],
+                pending_action=PendingAction(
+                    type=sheets.EXPAND_ACTION, token=token, expires_at=expires_at,
+                    approve_label="Yes, search more widely", decline_label="No, cancel",
+                ),
+            )
         if result.get("outcome") != "answered":
             logger.info(
                 "chat.finish id=%s outcome=%s total_ms=%.2f",

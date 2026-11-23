@@ -7,6 +7,10 @@ START → classify ─conversational─► conversational_reply ─────�
             ▲    │ same query as before   │ poor, retry allowed
             │    └──────────────────────────────────────► no_context ──────────► finalize
             └────────────────────────┘ poor, exhausted ─► no_context
+
+/notes (note_making): grade ─relevant─► study_sheet ─► finalize. study_sheet either
+produces StudySheet content (the endpoint renders the PDF) or, when the material is
+too thin, asks to widen the search (needs_expansion) or reports it (insufficient).
 """
 import functools
 import logging
@@ -42,7 +46,7 @@ def build_graph():
     """Wire the nodes and conditional edges shown in the module docstring and compile the graph."""
     graph = StateGraph(RagState, context_schema=RagContext)
     for name in ("classify", "conversational_reply", "rewrite_query", "retrieve", "grade",
-                 "generate", "validate", "no_context", "finalize"):
+                 "generate", "validate", "study_sheet", "no_context", "finalize"):
         graph.add_node(name, _timed(name, getattr(nodes, name)))
     graph.add_edge(START, "classify")
     graph.add_conditional_edges("classify", nodes.after_classify,
@@ -51,10 +55,11 @@ def build_graph():
     graph.add_conditional_edges("rewrite_query", nodes.after_rewrite, ["retrieve", "no_context"])
     graph.add_edge("retrieve", "grade")
     graph.add_conditional_edges("grade", nodes.after_grade,
-                                ["generate", "rewrite_query", "no_context"])
+                                ["generate", "study_sheet", "rewrite_query", "no_context"])
     graph.add_edge("generate", "validate")
     graph.add_edge("validate", "finalize")
     graph.add_edge("no_context", "finalize")
+    graph.add_edge("study_sheet", "finalize")
     graph.add_edge("finalize", END)
     return graph.compile()
 
@@ -62,12 +67,16 @@ def build_graph():
 RAG_GRAPH = build_graph()
 
 
-async def run_rag_graph(route: RouteResult, history: list[dict], context: RagContext) -> RagState:
-    """Run the workflow for one chat request and return the final state."""
+async def run_rag_graph(route: RouteResult, history: list[dict], context: RagContext,
+                        expanded: bool = False) -> RagState:
+    """Run the workflow for one chat request and return the final state.
+
+    ``expanded`` is set only after the student approved a wider /notes search.
+    """
     started = time.perf_counter()
     result = await RAG_GRAPH.ainvoke(
         {"question": route.question, "history": history, "route": route,
-         "attempts": 0, "trace": [], "llm_calls": 0},
+         "attempts": 0, "trace": [], "llm_calls": 0, "expanded": expanded},
         context=context,
         config={"recursion_limit": RECURSION_LIMIT},
     )

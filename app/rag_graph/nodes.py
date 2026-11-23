@@ -14,6 +14,7 @@ from app.prompt_registry import PROMPT_DIR
 from app.rag_graph.context import RagContext
 from app.rag_graph.state import RagState
 from app.services import llm_provider, retrieval, vector_store
+from app.services import study_sheet as sheets
 
 logger = logging.getLogger("app.rag_graph")
 chat_logger = logging.getLogger("app.api.chat")  # keep the existing chat.* log events
@@ -184,9 +185,13 @@ async def retrieve(state: RagState, runtime: Runtime[RagContext]) -> dict:
     ctx = runtime.context
     settings = get_settings()
     top_k = state["route"].tool.top_k or settings.top_k
+    if state.get("expanded"):
+        # Approved wider /notes search: more chunks, still only this course.
+        top_k = sheets.expanded_top_k(settings)
     started = time.perf_counter()
-    chat_logger.info("chat.retrieval.start id=%s course=%s top_k=%s attempt=%s",
-                     ctx.request_id, ctx.course_id, top_k, state.get("attempts", 0) + 1)
+    chat_logger.info("chat.retrieval.start id=%s course=%s top_k=%s attempt=%s expanded=%s",
+                     ctx.request_id, ctx.course_id, top_k, state.get("attempts", 0) + 1,
+                     bool(state.get("expanded")))
     loop = asyncio.get_running_loop()
     matches = await loop.run_in_executor(
         retrieval.get_retrieval_executor(),
@@ -223,7 +228,7 @@ async def grade(state: RagState, runtime: Runtime[RagContext]) -> dict:
         logger.warning("rag_graph.grade.fallback id=%s error=%s", ctx.request_id, exc)
         relevant = matches
     if relevant:
-        next_step = "generate"
+        next_step = "study_sheet" if sheets.is_notes(state["route"].tool.id) else "generate"
     elif (
         state.get("retrieved_raw", 0) > 0                      # something exists, just not close enough
         and state["route"].tool.id != "exact_text_extraction"
@@ -238,6 +243,45 @@ async def grade(state: RagState, runtime: Runtime[RagContext]) -> dict:
 def after_grade(state: RagState) -> str:
     """Edge: the next_step chosen by grade."""
     return state["next_step"]
+
+
+async def study_sheet(state: RagState, runtime: Runtime[RagContext]) -> dict:
+    """/notes: check the material is sufficient, then generate the study sheet content.
+
+    Too little material on a normal search asks the student before widening it
+    (needs_expansion); too little after a widened search is reported honestly
+    (insufficient). Either way no sheet is made. The PDF itself is rendered by
+    the chat endpoint, not here.
+    """
+    ctx = runtime.context
+    settings = get_settings()
+    matches = state["matches"]
+    question = state["route"].question
+    expanded = bool(state.get("expanded"))
+    limited = {"matches": [], "sources": [], "context": "", "study_sheet": None,
+               "answer": (sheets.still_limited_message(question) if expanded
+                          else sheets.ask_to_expand_message(question)),
+               "outcome": "insufficient" if expanded else "needs_expansion"}
+    if not sheets.enough_material(matches, settings):
+        chat_logger.info("chat.study_sheet.limited id=%s chunks=%s expanded=%s reason=too_little",
+                         ctx.request_id, len(matches), expanded)
+        return limited
+
+    context, sources = retrieval.build_context_and_sources(matches)
+    started = time.perf_counter()
+    chat_logger.info("chat.llm.start id=%s provider=%s model=%s task=study_sheet",
+                     ctx.request_id, ctx.provider, ctx.model)
+    # Uses the original question (route.question), never the rewritten search query.
+    sheet = await sheets.generate_study_sheet(question, context, state.get("history", []),
+                                              ctx.provider, ctx.model, ctx.fallback)
+    chat_logger.info("chat.llm.finish id=%s task=study_sheet coverage=%s duration_ms=%.2f",
+                     ctx.request_id, sheet.coverage, (time.perf_counter() - started) * 1000)
+    if sheet.coverage == "limited" or not sheet.has_content():
+        chat_logger.info("chat.study_sheet.limited id=%s chunks=%s expanded=%s reason=model",
+                         ctx.request_id, len(matches), expanded)
+        return {**limited, "llm_calls": 1}
+    return {"study_sheet": sheet, "context": context, "sources": sources, "answer": "",
+            "outcome": "study_sheet", "llm_calls": 1}
 
 
 async def generate(state: RagState, runtime: Runtime[RagContext]) -> dict:
