@@ -49,6 +49,7 @@ LearnerTutors/
 |       |-- configuration_check.py  Live provider checks for POST /admin/test-configuration
 |       |-- document_parser.py  PDF/DOCX/PPTX/TXT/MD text extraction, with headings
 |       |-- keyword_index.py    Per-course BM25 keyword ranking for hybrid search
+|       |-- document_images.py  Figures from documents: filter, store, [IMGn] markers, access-checked serving
 |       |-- embedding_provider.py  Embeddings via OpenAI, Gemini or Ollama
 |       |-- illustrations.py    /explain image generation (OpenAI or Gemini) and signed URLs
 |       |-- llm_provider.py     The only chat-generation abstraction (LangChain models)
@@ -175,7 +176,7 @@ START → classify ─conversational─► conversational_reply ─────�
   - Keeps the best top_k.
   - `/summarize` and `/studyguide`: when at least half the hits come from one document (and heading), that document or section is read in order, one passage per page, if it fits in `SUMMARY_CONTEXT_CHARS`.
   - Otherwise the best `RETRIEVAL_NEIGHBOUR_HITS` hits are merged with their neighbouring chunks, and adjacent hits are merged into one passage. A merged passage carries `chunk_count`; `retrieved_chunks` and the `/notes` sufficiency check count chunks, not passages.
-- **generate:** builds the numbered `[S1..Sn]` passages (with file, page and section) and sources (`services/retrieval.py`), then calls `generate_answer_async`.
+- **generate:** attaches document figures (`document_images.attach_images`), builds the numbered `[S1..Sn]` passages (with file, page, section and `[IMGn: caption]` figure markers) and sources (`services/retrieval.py`), calls `generate_answer_async`, then keeps only valid `[IMGn]` markers. The response lists the figures in `images` (omitted when none).
 - **validate:** a pass-through hook for a future grounding validator.
 - **no_context:** returns the standard "I couldn't find relevant text…" message.
 
@@ -202,8 +203,14 @@ Each node logs `rag_graph.node.finish`. Every request ends with `rag_graph.finis
   - PPTX via python-pptx;
   - TXT and MD as UTF-8.
 
+  Sections carry `images` (PDF, DOCX, PPTX): each embedded image with its character position in the section text, a caption (a nearby "Figure …" line plus up to 3 continuation lines of its text block, the alt text, or the slide title) and a content hash. PDF figures drawn as vector paths (charts, diagrams) have no picture: when a figure caption (not "Table") has no picture, the drawings next to it (above first, then below; same text column; never past a body-text paragraph; at least 3 path items and 100×60 pt; page rules ignored) plus nearby short labels are rendered to PNG at 2× (max 1600 px) and inserted just before the caption, like an embedded picture. A picture inside such a region is replaced by the rendering. Rotated pages are skipped.
+
   Sections carry a `heading` when the document has one: PDF lines at least 1.2 × the body font size, DOCX Heading/Title styles, the PPTX slide title, Markdown `#` lines. Scanned PDFs need OCR, which isn't included.
-- **`chunker.py`** packs paragraphs and sentences into chunks of up to `CHUNK_SIZE` characters. Consecutive chunks repeat whole sentences of up to `CHUNK_OVERLAP` characters. Each chunk keeps its page and heading, and gets a document-wide `chunk_index`.
+- **`chunker.py`** packs paragraphs and sentences into chunks of up to `CHUNK_SIZE` characters. Consecutive chunks repeat whole sentences of up to `CHUNK_OVERLAP` characters. Each chunk keeps its page and heading, and gets a document-wide `chunk_index`. Images never enter the chunk text: `image_refs` lists the images that follow a chunk (an image inside a chunk's text is anchored to that chunk), and `image_refs_before` on the first chunk lists images before any text.
+- **`document_images.py`** (figures in answers):
+  - at indexing, drops icons (< 100 px), images used 3+ times (logos, backgrounds) and formats Pillow cannot read (e.g. EMF), converts the rest to PNG (max 1600 px, max 200 per document) and stores them with a `manifest.json` (image ID, anchor chunk, caption, page) under `storage/document_images/<hash of course+document>/`; re-indexing replaces them, deleting a document or a failed re-index removes them;
+  - in `generate`, `attach_images` takes up to 6 images anchored from just before to just after each passage (`chunk_range`), at most 2 per passage, preferring captions that share words with the question, `build_context_and_sources` shows them as `[IMGn: caption]` where they sit, and `resolve_markers` keeps only supplied markers, once each (`placed`); when the context has figures, `prompt_builder` also adds `prompts/core/figure_reminder.md` to the task prompt, before its closing cue;
+  - `GET /api/v1/document-images/{image_id}?course_id=&document_id=` (API key) serves the PNG only if it is in that course document's manifest and the document passes the retrieval access filter. Moodle must proxy it after checking the user's course access (`docs/frontend-document-images-handoff.md`).
 - **`embedding_provider.py`** produces embeddings through OpenAI, Gemini or Ollama. The provider/model comes from Moodle when it sets one, otherwise from `.env` (`EMBEDDING_PROVIDER`/`EMBEDDING_MODEL`). The key is the chat key when `embedding_reuse_chat_api_key` is on; otherwise the Moodle embedding key, then the chat key. `embed_texts(..., settings=)` accepts unsaved settings for the configuration test.
 - **`vector_store.py`:**
   - opens the Chroma collection for the active embedding model, named `<prefix>_<provider>_<model>_<hash>`, and reopens it in every worker when the embedding identity changes;

@@ -84,16 +84,36 @@ class ChatResponse(BaseModel):
     download: "DownloadItem | None" = None
     # Set when the assistant needs the student's explicit approval to continue.
     pending_action: "PendingAction | None" = None
+    # Figures from the course documents behind the answer; omitted when there are none.
+    images: "list[ImageItem] | None" = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_extras(self, handler):
-        """Leave ``download``/``pending_action`` out when unset, so every other reply
-        is serialised exactly as before these fields existed."""
+        """Leave ``download``/``pending_action``/``images`` out when unset or empty, so
+        every other reply is serialised exactly as before these fields existed."""
         data = handler(self)
-        for key in ("download", "pending_action"):
-            if data.get(key) is None:
+        for key in ("download", "pending_action", "images"):
+            if not data.get(key):
                 data.pop(key, None)
         return data
+
+
+class ImageItem(BaseModel):
+    """A figure from a course document.
+
+    ``placed`` means the answer contains ``[marker]`` (e.g. ``[IMG1]``) where the
+    figure belongs; unplaced figures come from the same passages and can be
+    shown after the answer. Moodle fetches the PNG from ``path`` (relative to
+    the backend URL) with the API key, after checking the user's course access.
+    """
+    marker: str
+    image_id: str
+    document_id: str
+    filename: str
+    page: int | None = None
+    caption: str
+    placed: bool
+    path: str
 
 
 class DownloadItem(BaseModel):

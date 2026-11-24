@@ -2,12 +2,13 @@
 import asyncio
 import logging
 import time
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
-from app.schemas import ChatRequest, ChatResponse, DownloadItem, PendingAction
+from app.schemas import ChatRequest, ChatResponse, DownloadItem, ImageItem, PendingAction
 from app.security import RequireApiKey
 from app.services import llm_provider, pending_actions, retrieval, temp_files
 from app.services import study_sheet as sheets
@@ -269,6 +270,16 @@ async def ask(request: ChatRequest, http_request: Request):
             retrieved_chunks=retrieval.chunk_count(matches),
             retrieved_contexts=[match["text"] for match in matches],
             illustration_url=illustration_url,
+            images=[
+                ImageItem(
+                    marker=image["marker"], image_id=image["image_id"],
+                    document_id=image["document_id"], filename=image["filename"],
+                    page=image["page"], caption=image["caption"], placed=image["placed"],
+                    path=(f"/api/v1/document-images/{image['image_id']}"
+                          f"?course_id={request.course_id}&document_id={quote(image['document_id'], safe='')}"),
+                )
+                for image in result.get("images") or []
+            ],
         )
 
     except HTTPException:

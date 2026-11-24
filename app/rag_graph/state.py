@@ -25,6 +25,7 @@ class RagState(TypedDict, total=False):
     next_step: str
     context: str
     sources: list[SourceItem]
+    images: list[dict[str, Any]]  # document images offered as [IMGn]; see document_images
     answer: str
     validation: dict[str, Any] | None   # filled by the grounding validator (later track)
     study_sheet: Any              # /notes: StudySheet content; the endpoint renders the PDF

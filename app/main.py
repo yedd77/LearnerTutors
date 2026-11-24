@@ -13,7 +13,7 @@ from app.config import apply_tracing_policy, get_settings
 # Disable LangSmith tracing before any LangChain module is imported or used.
 apply_tracing_policy()
 
-from app.api import admin, chat, documents, downloads, illustrations  # noqa: E402
+from app.api import admin, chat, document_images, documents, downloads, illustrations  # noqa: E402
 
 # Configure application logging before importing/serving requests.
 s = get_settings()
@@ -103,6 +103,7 @@ app.include_router(documents.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
 app.include_router(illustrations.router, prefix="/api/v1")
 app.include_router(downloads.router, prefix="/api/v1")
+app.include_router(document_images.router, prefix="/api/v1")
 
 
 @app.middleware("http")

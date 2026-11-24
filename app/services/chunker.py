@@ -50,21 +50,47 @@ def _join(units: list[tuple[str, str]]) -> str:
     return "".join((separator if i else "") + text for i, (separator, text) in enumerate(units))
 
 
-def _pack(text: str, size: int, overlap: int) -> list[str]:
-    """Pack sentences into chunks of at most ``size`` characters.
+def _normalise(text: str) -> str:
+    text = re.sub(r"[ \t]+", " ", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _section_units(section: dict, size: int) -> list[tuple]:
+    """Text units ``(separator, sentence)`` with image units ``(None, ref)`` at their positions."""
+    text = section["text"]
+    images = sorted(section.get("images") or [], key=lambda image: image["offset"])
+    units: list[tuple] = []
+    start = 0
+    for image in images + [None]:
+        end = len(text) if image is None else min(max(image["offset"], start), len(text))
+        for i, (separator, sentence) in enumerate(_units(_normalise(text[start:end]))):
+            if i == 0 and any(u[0] is not None for u in units):
+                separator = "\n"            # text continues after an image
+            for j, piece in enumerate(_split_long(sentence, size)):
+                units.append((separator if j == 0 else " ", piece))
+        if image is not None:
+            units.append((None, image["ref"]))
+        start = end
+    return units
+
+
+def _pack(units: list[tuple], size: int, overlap: int) -> tuple[list[str], list[tuple[int, int]]]:
+    """Pack sentences into chunks of at most ``size`` characters; place images between them.
 
     Consecutive chunks repeat whole trailing sentences of up to ``overlap``
     characters, so a chunk never starts or ends mid-sentence unless a single
-    sentence is longer than ``size``.
+    sentence is longer than ``size``. Returns the chunk texts and ``(ref, anchor)``
+    pairs: the image follows chunk ``anchor`` (``-1``: before the first chunk).
+    An image inside a chunk's new text is anchored to that chunk.
     """
-    units: list[tuple[str, str]] = []
-    for separator, sentence in _units(text):
-        for i, piece in enumerate(_split_long(sentence, size)):
-            units.append((separator if i == 0 else " ", piece))
-
     chunks: list[str] = []
+    anchors: list[tuple[int, int]] = []
     current: list[tuple[str, str]] = []
+    fresh = 0                                   # units added since the last chunk was emitted
     for unit in units:
+        if unit[0] is None:
+            anchors.append((unit[1], len(chunks) if fresh else len(chunks) - 1))
+            continue
         if current and len(_join(current + [unit])) > size:
             chunks.append(_join(current))
             carried: list[tuple[str, str]] = []
@@ -73,10 +99,12 @@ def _pack(text: str, size: int, overlap: int) -> list[str]:
                     break
                 carried.insert(0, previous)
             current = carried if len(_join(carried + [unit])) <= size else []
+            fresh = 0
         current.append(unit)
-    if current:
+        fresh += 1
+    if current and fresh:
         chunks.append(_join(current))
-    return chunks
+    return chunks, anchors
 
 
 # function to chunk text into smaller piece based on the chunk size and overlap
@@ -89,21 +117,33 @@ def chunk_sections(sections: list[dict]) -> list[dict]:
     the size; size is at least 200). Every chunk keeps its section's page and
     heading (``None`` when absent) for citations, and ``chunk_index`` is its
     position in the whole document, used to fetch neighbours in order.
+
+    Images in a section (see document_parser) are anchored without entering
+    the text: ``image_refs`` on a chunk lists images that follow it, and
+    ``image_refs_before`` on the first chunk lists images before any text. Both
+    keys are present only when there are images.
     """
     s = get_settings()
     size = max(200, s.chunk_size)
     overlap = max(0, min(s.chunk_overlap, size // 2))
-    chunks = []
+    chunks: list[dict] = []
+    before: list[int] = []                      # images before the document's first chunk
     for section in sections:
-        text = re.sub(r"[ \t]+", " ", section["text"])
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
-        for part in _pack(text, size, overlap):
-            part = part.strip()
-            if part:
-                chunks.append({
-                    "page": section.get("page"),
-                    "heading": section.get("heading"),
-                    "text": part,
-                    "chunk_index": len(chunks),
-                })
+        base = len(chunks)
+        texts, anchors = _pack(_section_units(section, size), size, overlap)
+        for part in texts:
+            chunks.append({
+                "page": section.get("page"),
+                "heading": section.get("heading"),
+                "text": part.strip(),
+                "chunk_index": len(chunks),
+            })
+        for ref, anchor in anchors:
+            index = base + anchor
+            if index < 0:
+                before.append(ref)
+            else:
+                chunks[index].setdefault("image_refs", []).append(ref)
+    if before and chunks:
+        chunks[0]["image_refs_before"] = before
     return chunks

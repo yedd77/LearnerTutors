@@ -15,6 +15,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from app.config import get_settings
 from app.schemas import DeleteResponse, IndexResponse
 from app.security import RequireApiKey
+from app.services import document_images
 from app.services.chunker import chunk_sections
 from app.services.document_parser import SUPPORTED_EXTENSIONS, DocumentParseError, extract_sections
 from app.services.suggestion_generator import (
@@ -136,12 +137,22 @@ def index_upload(
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         logger.exception("document.vector_index.error document=%s course=%s", document_id, course_id)
+        # The failed reindex removed the old chunks; remove the old images too.
+        document_images.delete_document_images(course_id, document_id)
         raise HTTPException(502, f"Indexing failed: {exc}") from exc
 
     logger.info(
         "document.vector_index.finish document=%s indexed_chunks=%s duration_ms=%.2f",
         document_id, count, (time.perf_counter() - index_started) * 1000,
     )
+
+    # Figures are optional: a failure is logged and never fails indexing.
+    try:
+        stored_images = document_images.store_document_images(course_id, document_id, sections, chunks)
+        logger.info("document.images.finish document=%s images=%s", document_id, stored_images)
+    except Exception:
+        logger.exception("document.images.error document=%s", document_id)
+        document_images.delete_document_images(course_id, document_id)
 
     # Suggestions run as a separate Moodle background task so slow LLM
     # generation never holds up indexing completion or the document status.
@@ -249,6 +260,7 @@ def remove_document(document_id: str, course_id: int):
     """Delete every chunk of a document, scoped to its course (404 if none matched)."""
     try:
         count = delete_document(document_id, course_id)
+        document_images.delete_document_images(course_id, document_id)
     except Exception as exc:
         raise HTTPException(500, f"Deletion failed: {exc}") from exc
     if count == 0:

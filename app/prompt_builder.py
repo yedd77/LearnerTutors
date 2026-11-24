@@ -66,6 +66,19 @@ def build_prompt_bundle(
         history=history,
         question=route.question,
     )
+    # Figures from course documents appear as [IMGn: caption] in the context. The
+    # rule is in the system prompt; repeating it next to the task makes models
+    # actually place the markers.
+    if "[IMG" in context:
+        reminder_path = CORE_DIR / "figure_reminder.md"
+        if reminder_path.is_file():
+            reminder = _read_prompt(str(reminder_path))
+            # Keep the template's closing cue ("## Answer", "## Explanation") last.
+            head, _, cue = task_prompt.rstrip().rpartition("\n")
+            if head and cue.startswith("## "):
+                task_prompt = f"{head.rstrip()}\n\n{reminder}\n\n{cue}"
+            else:
+                task_prompt = f"{task_prompt}\n\n{reminder}"
 
     return {
         "tool_id": tool.id,

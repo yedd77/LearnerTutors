@@ -641,7 +641,8 @@ def expand_with_neighbours(matches: list[dict], course_id: int, neighbour_hits: 
     The top ``neighbour_hits`` hits also pull in chunk ``index-1`` and ``index+1``
     of the same document; hits that are adjacent to each other are merged into
     one passage. A passage keeps the metadata, citation page and score of its
-    best-ranked hit, and ``chunk_count`` says how many chunks it contains.
+    best-ranked hit; ``chunk_count``, ``chunk_range`` (first, last index) and
+    ``chunk_ends`` (index -> end offset in the text) describe what it contains.
     Chunks indexed before ``chunk_index`` existed are left as is.
     """
     wanted: dict[str, set[int]] = {}
@@ -688,10 +689,20 @@ def expand_with_neighbours(matches: list[dict], course_id: int, neighbour_hits: 
             continue                     # already merged into a better-ranked passage
         emitted.add((document_id, run))
         text = texts[(document_id, run[0])]
+        ends = {run[0]: len(text)}             # where each chunk ends in the merged text
         for member in run[1:]:
             text = merge_chunk_texts(text, texts[(document_id, member)])
-        expanded.append({**match, "text": text, "chunk_count": len(run)})
+            ends[member] = len(text)
+        expanded.append({**match, "text": text, "chunk_count": len(run),
+                         "chunk_range": (run[0], run[-1]), "chunk_ends": ends})
     return expanded
+
+
+def document_visible(course_id: int, document_id: str) -> bool:
+    """True if the document has searchable chunks in this course (the retrieval access filter)."""
+    found = get_collection().get(where=_course_where(course_id, {"document_id": str(document_id)}),
+                                 limit=1, include=[])
+    return bool(found.get("ids"))
 
 
 def ordered_document_chunks(document_id: str, course_id: int,

@@ -70,6 +70,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import app.api.admin as admin_module  # noqa: E402
 import app.config as config_module  # noqa: E402
+import app.services.document_images as document_images_module  # noqa: E402
 import app.services.illustrations as illustrations_module  # noqa: E402
 import app.services.temp_files as temp_files_module  # noqa: E402
 import app.services.vector_store as vector_store  # noqa: E402
@@ -129,6 +130,7 @@ def isolated_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(config_module, "RUNTIME_CONFIG_PATH", runtime_path)
     monkeypatch.setattr(admin_module, "RUNTIME_CONFIG_PATH", runtime_path)
     monkeypatch.setattr(illustrations_module, "IMAGE_DIR", tmp_path / "illustrations")
+    monkeypatch.setattr(document_images_module, "IMAGE_ROOT", tmp_path / "document_images")
     monkeypatch.setattr(temp_files_module, "GENERATED_DIR", tmp_path / "generated")
     reset_settings_cache()
     yield runtime_path

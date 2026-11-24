@@ -113,3 +113,177 @@ def test_unsupported_extension(name):
 def test_corrupt_files_become_parse_errors(name):
     with pytest.raises(DocumentParseError, match="Could not parse"):
         extract_sections(name, b"this is not a real document")
+
+
+# --------------------------------------------------------------------------- vector-drawn PDF figures
+PLASMA_CAPTION = "FIGURE 1 Plasma concentration versus time"
+
+
+def _png(width=200, height=150) -> bytes:
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (width, height), (40, 120, 200)).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def _draw_chart(page, top=120.0, left=100.0, width=300.0, height=160.0):
+    """Axes, a curve and labels: a typical drawn (not embedded) textbook chart."""
+    shape = page.new_shape()
+    shape.draw_line((left, top + height), (left + width, top + height))       # x axis
+    shape.draw_line((left, top), (left, top + height))                        # y axis
+    shape.draw_polyline([(left + 10 + i * (width - 20) / 9, top + height - 10 - (i * (9 - i)) * 3.5)
+                         for i in range(10)])                                 # curve
+    shape.finish(color=(0, 0, 0), width=1)
+    shape.commit()
+    page.insert_text((left + width / 2 - 10, top + height + 14), "Time", fontsize=8)
+    page.insert_text((left - 40, top + 10), "Conc.", fontsize=8)
+    return fitz.Rect(left, top, left + width, top + height)
+
+
+def _page_with(draw) -> bytes:
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Drug levels are measured after each dose given to the patient.",
+                     fontsize=11)
+    draw(page)
+    page.insert_text((72, 700), "The concentration then falls as the drug is eliminated from the body.",
+                     fontsize=11)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+def test_vector_chart_above_a_figure_caption_is_rendered():
+    region = {}
+
+    def draw(page):
+        region["chart"] = _draw_chart(page)
+        page.insert_text((72, 320), PLASMA_CAPTION, fontsize=10)
+
+    [section] = extract_sections("a.pdf", _page_with(draw))
+    [image] = section["images"]
+    assert image["caption"] == PLASMA_CAPTION and image["page"] == 1
+    from PIL import Image
+
+    with Image.open(BytesIO(image["data"])) as rendered:
+        assert rendered.format == "PNG"
+        chart = region["chart"]
+        assert rendered.width >= 2 * chart.width and rendered.height >= 2 * chart.height
+    # The image sits just before the caption; label text stays in the page text.
+    assert section["text"][image["offset"]:].lstrip().startswith(PLASMA_CAPTION)
+    assert "Time" in section["text"]
+
+
+def test_raster_figure_with_the_same_caption_is_not_duplicated():
+    def draw(page):
+        page.insert_image(fitz.Rect(100, 120, 400, 280), stream=_png())
+        page.insert_text((72, 300), PLASMA_CAPTION, fontsize=10)
+
+    [section] = extract_sections("a.pdf", _page_with(draw))
+    [image] = section["images"]
+    assert image["caption"] == PLASMA_CAPTION
+
+
+def test_raster_inside_a_drawn_figure_is_replaced_by_the_rendered_region():
+    def draw(page):
+        _draw_chart(page)
+        page.insert_image(fitz.Rect(150, 140, 300, 250), stream=_png())    # picture inside the axes
+        page.insert_text((72, 320), PLASMA_CAPTION, fontsize=10)
+
+    [section] = extract_sections("a.pdf", _page_with(draw))
+    [image] = section["images"]
+    from PIL import Image
+
+    with Image.open(BytesIO(image["data"])) as rendered:
+        assert rendered.width >= 600                     # the whole chart, not the 150 pt picture
+
+
+def test_table_rules_are_not_rendered():
+    def draw(page):
+        shape = page.new_shape()
+        for y in (120, 150, 180, 210, 240):
+            shape.draw_line((100, y), (400, y))
+        for x in (100, 250, 400):
+            shape.draw_line((x, 120), (x, 240))
+        shape.finish(color=(0, 0, 0), width=0.5)
+        shape.commit()
+        page.insert_text((72, 260), "TABLE 1 Dosing intervals by drug", fontsize=10)
+
+    [section] = extract_sections("a.pdf", _page_with(draw))
+    assert "images" not in section
+
+
+def test_page_rules_alone_are_not_a_figure():
+    def draw(page):
+        shape = page.new_shape()
+        shape.draw_line((20, 40), (page.rect.width - 20, 40))          # header rule
+        shape.draw_line((20, 800), (page.rect.width - 20, 800))        # footer rule
+        shape.finish(color=(0, 0, 0), width=0.5)
+        shape.commit()
+        page.insert_text((72, 320), "Figure 2 Loading dose and maintenance dose", fontsize=10)
+
+    [section] = extract_sections("a.pdf", _page_with(draw))
+    assert "images" not in section
+
+
+def test_body_text_paragraph_bounds_the_figure():
+    def draw(page):
+        shape = page.new_shape()
+        shape.draw_line((100, 90), (400, 90))             # an unrelated rule above the paragraph
+        shape.draw_line((100, 95), (400, 95))
+        shape.finish(color=(0, 0, 0), width=1)
+        shape.commit()
+        page.insert_text((100, 110), "This is a long body text paragraph line that separates the "
+                                     "figure from anything above it.", fontsize=9)
+        _draw_chart(page, top=130)
+        page.insert_text((72, 330), PLASMA_CAPTION, fontsize=10)
+
+    [section] = extract_sections("a.pdf", _page_with(draw))
+    from PIL import Image
+
+    with Image.open(BytesIO(section["images"][0]["data"])) as rendered:
+        assert rendered.height < 2 * (330 - 100)          # did not grow over the paragraph
+
+
+def test_rendered_figure_is_stored_and_anchored_at_its_caption():
+    from app.services import document_images
+    from app.services.chunker import chunk_sections
+
+    def draw(page):
+        _draw_chart(page)
+        page.insert_text((72, 320), PLASMA_CAPTION, fontsize=10)
+
+    sections = extract_sections("a.pdf", _page_with(draw))
+    chunks = chunk_sections(sections)
+    assert document_images.store_document_images(1, "pk", sections, chunks) == 1
+    [entry] = document_images._manifest(1, "pk")
+    assert entry["caption"] == PLASMA_CAPTION and entry["page"] == 1
+    anchor = chunks[entry["anchor"]] if entry["anchor"] >= 0 else chunks[0]
+    assert "Plasma concentration" in anchor["text"] or "Time" in anchor["text"]
+
+
+def test_short_caption_line_still_renders_the_full_width_figure():
+    """A caption line like "FIGURE 3" alone is narrower than its figure."""
+    def draw(page):
+        page.insert_text((72, 100), "This body paragraph spans the whole text column from the left "
+                                    "margin to the right margin.", fontsize=9)
+        _draw_chart(page, left=330, width=200)            # chart to the right of the caption
+        page.insert_text((72, 320), "FIGURE 3", fontsize=10)
+
+    [section] = extract_sections("a.pdf", _page_with(draw))
+    from PIL import Image
+
+    with Image.open(BytesIO(section["images"][0]["data"])) as rendered:
+        assert rendered.width >= 2 * 200
+
+
+def test_rotated_pages_are_not_rendered():
+    def draw(page):
+        _draw_chart(page)
+        page.insert_text((72, 320), PLASMA_CAPTION, fontsize=10)
+
+    doc = fitz.open(stream=_page_with(draw), filetype="pdf")
+    doc[0].set_rotation(90)
+    [section] = extract_sections("a.pdf", doc.tobytes())
+    assert "images" not in section

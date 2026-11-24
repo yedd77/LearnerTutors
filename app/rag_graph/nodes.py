@@ -13,7 +13,7 @@ from app.prompt_builder import _fill, _read_prompt
 from app.prompt_registry import PROMPT_DIR
 from app.rag_graph.context import RagContext
 from app.rag_graph.state import RagState
-from app.services import llm_provider, retrieval, vector_store
+from app.services import document_images, llm_provider, retrieval, vector_store
 from app.services import study_sheet as sheets
 
 logger = logging.getLogger("app.rag_graph")
@@ -381,10 +381,18 @@ async def study_sheet(state: RagState, runtime: Runtime[RagContext]) -> dict:
 
 
 async def generate(state: RagState, runtime: Runtime[RagContext]) -> dict:
-    """Build the [S1..Sn] context and sources, then generate the grounded answer."""
+    """Build the [S1..Sn] context (with [IMGn] figure markers) and sources, then generate the answer.
+
+    Document images anchored at the passages are offered to the model as
+    ``[IMGn: caption]``; afterwards only supplied markers are kept in the answer.
+    """
     ctx = runtime.context
     started = time.perf_counter()
-    context, sources = retrieval.build_context_and_sources(state["matches"])
+    loop = asyncio.get_running_loop()
+    images = await loop.run_in_executor(retrieval.get_retrieval_executor(),
+                                        document_images.attach_images, state["matches"], ctx.course_id,
+                                        document_images.MAX_PER_ANSWER, state["question"])
+    context, sources = retrieval.build_context_and_sources(state["matches"], images)
     history = state.get("history", [])
     chat_logger.info(
         "chat.context.ready id=%s chunks=%s sources=%s context_chars=%s history_messages=%s duration_ms=%.2f",
@@ -398,9 +406,16 @@ async def generate(state: RagState, runtime: Runtime[RagContext]) -> dict:
         route=state["route"], context=context, history=history,
         provider=ctx.provider, model=ctx.model, fallback=ctx.fallback,
     )
-    chat_logger.info("chat.llm.finish id=%s answer_chars=%s duration_ms=%.2f",
-                     ctx.request_id, len(answer), (time.perf_counter() - started) * 1000)
-    return {"answer": answer, "context": context, "sources": sources,
+    marker_stats: dict = {}
+    answer, images = document_images.resolve_markers(answer, images, stats=marker_stats)
+    chat_logger.info("chat.llm.finish id=%s answer_chars=%s images=%s placed=%s duration_ms=%.2f",
+                     ctx.request_id, len(answer), len(images), sum(i["placed"] for i in images),
+                     (time.perf_counter() - started) * 1000)
+    if marker_stats.get("over_limit"):
+        # Counts only: the model placed more figures than the answer may show.
+        chat_logger.info("chat.figures.over_limit id=%s dropped=%s limit=%s", ctx.request_id,
+                         marker_stats["over_limit"], document_images.MAX_PLACED_PER_ANSWER)
+    return {"answer": answer, "context": context, "sources": sources, "images": images,
             "outcome": "answered", "llm_calls": 1}
 
 

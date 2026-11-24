@@ -120,17 +120,38 @@ def document_passages(matches: list[dict], course_id: int, max_chars: int) -> li
         return None
     passages: list[dict] = []
     for chunk in chunks:
+        index = chunk["metadata"]["chunk_index"]
         if passages and passages[-1]["metadata"].get("page") == chunk["metadata"].get("page"):
-            passages[-1]["text"] = vector_store.merge_chunk_texts(passages[-1]["text"], chunk["text"])
-            passages[-1]["chunk_count"] += 1
+            passage = passages[-1]
+            passage["text"] = vector_store.merge_chunk_texts(passage["text"], chunk["text"])
+            passage["chunk_count"] += 1
+            passage["chunk_range"] = (passage["chunk_range"][0], index)
+            passage["chunk_ends"][index] = len(passage["text"])
         else:
-            passages.append({**chunk, "distance": None, "chunk_count": 1})
+            passages.append({**chunk, "distance": None, "chunk_count": 1, "chunk_range": (index, index),
+                             "chunk_ends": {index: len(chunk["text"])}})
     return passages
 
 
-def build_context_and_sources(matches: list[dict]) -> tuple[str, list[SourceItem]]:
-    """Number passages [S1..Sn] and group them into one source per document page."""
+def _with_image_markers(text: str, images: list[dict]) -> str:
+    """Insert ``[IMGn: caption]`` lines where the images sit in a passage."""
+    for image in sorted(images, key=lambda item: item["offset"], reverse=True):
+        offset = max(0, min(image["offset"], len(text)))
+        text = f"{text[:offset].rstrip()}\n[{image['marker']}: {image['caption']}]\n{text[offset:].lstrip()}"
+    return text.strip()
+
+
+def build_context_and_sources(matches: list[dict],
+                              images: list[dict] | None = None) -> tuple[str, list[SourceItem]]:
+    """Number passages [S1..Sn] and group them into one source per document page.
+
+    ``images`` (from document_images.attach_images) are shown inside their
+    passage as ``[IMGn: caption]`` so the model can place them in the answer.
+    """
     passages, sources, source_indexes = [], [], {}
+    by_passage: dict[int, list[dict]] = {}
+    for image in images or []:
+        by_passage.setdefault(image["passage"], []).append(image)
     for i, match in enumerate(matches, 1):
         metadata = match["metadata"]
         page = metadata.get("page", -1)
@@ -141,7 +162,7 @@ def build_context_and_sources(matches: list[dict]) -> tuple[str, list[SourceItem
             f"[S{i}] File: {metadata.get('filename', 'Unknown')}; "
             f"page/slide: {page or 'not available'}"
             + (f"; section: {heading}" if heading else "")
-            + f"\n{match['text']}"
+            + f"\n{_with_image_markers(match['text'], by_passage.get(i - 1, []))}"
         )
         key = (document_id, page)
         source_index = source_indexes.get(key)
