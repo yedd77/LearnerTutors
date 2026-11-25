@@ -15,6 +15,10 @@ neighbour expansion or, for /summarize and /studyguide, the whole document in or
 /notes (note_making): grade ─relevant─► refine ─► study_sheet ─► finalize. study_sheet either
 produces StudySheet content (the endpoint renders the PDF) or, when the material is
 too thin, asks to widen the search (needs_expansion) or reports it (insufficient).
+
+/quiz (practice_quiz): grade ─relevant─► refine ─► practice_quiz ─► finalize. practice_quiz
+produces a validated PracticeQuiz (one retry on an invalid quiz, else quiz_failed) or, when
+the material is too thin, offers a broader topic (needs_expansion) or reports it (insufficient).
 """
 import functools
 import logging
@@ -50,7 +54,8 @@ def build_graph():
     """Wire the nodes and conditional edges shown in the module docstring and compile the graph."""
     graph = StateGraph(RagState, context_schema=RagContext)
     for name in ("classify", "conversational_reply", "rewrite_query", "retrieve", "grade",
-                 "refine", "generate", "validate", "study_sheet", "no_context", "finalize"):
+                 "refine", "generate", "validate", "study_sheet", "practice_quiz", "no_context",
+                 "finalize"):
         graph.add_node(name, _timed(name, getattr(nodes, name)))
     graph.add_edge(START, "classify")
     graph.add_conditional_edges("classify", nodes.after_classify,
@@ -60,11 +65,13 @@ def build_graph():
     graph.add_edge("retrieve", "grade")
     graph.add_conditional_edges("grade", nodes.after_grade,
                                 ["refine", "rewrite_query", "no_context"])
-    graph.add_conditional_edges("refine", nodes.after_refine, ["generate", "study_sheet"])
+    graph.add_conditional_edges("refine", nodes.after_refine,
+                                ["generate", "study_sheet", "practice_quiz"])
     graph.add_edge("generate", "validate")
     graph.add_edge("validate", "finalize")
     graph.add_edge("no_context", "finalize")
     graph.add_edge("study_sheet", "finalize")
+    graph.add_edge("practice_quiz", "finalize")
     graph.add_edge("finalize", END)
     return graph.compile()
 
@@ -76,7 +83,8 @@ async def run_rag_graph(route: RouteResult, history: list[dict], context: RagCon
                         expanded: bool = False) -> RagState:
     """Run the workflow for one chat request and return the final state.
 
-    ``expanded`` is set only after the student approved a wider /notes search.
+    ``expanded`` is set only after the student approved a wider /notes search or a
+    broader /quiz topic.
     """
     started = time.perf_counter()
     result = await RAG_GRAPH.ainvoke(

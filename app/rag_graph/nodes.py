@@ -6,7 +6,7 @@ import time
 from typing import Literal
 
 from langgraph.runtime import Runtime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.config import Settings, get_settings
 from app.prompt_builder import _fill, _read_prompt
@@ -14,6 +14,7 @@ from app.prompt_registry import PROMPT_DIR
 from app.rag_graph.context import RagContext
 from app.rag_graph.state import RagState
 from app.services import document_images, llm_provider, retrieval, vector_store
+from app.services import practice_quiz as quizzes
 from app.services import study_sheet as sheets
 
 logger = logging.getLogger("app.rag_graph")
@@ -208,9 +209,9 @@ def after_rewrite(state: RagState) -> str:
 
 
 def final_top_k(state: RagState, settings: Settings) -> int:
-    """Passages that reach the model: the tool's top_k, or the widened /notes value."""
+    """Passages that reach the model: the tool's top_k, or the widened /notes and /quiz value."""
     if state.get("expanded"):
-        # Approved wider /notes search: more chunks, still only this course.
+        # Approved wider /notes search or broader /quiz topic: more chunks, still only this course.
         return sheets.expanded_top_k(settings)
     return state["route"].tool.top_k or settings.top_k
 
@@ -332,12 +333,14 @@ async def refine(state: RagState, runtime: Runtime[RagContext]) -> dict:
     chat_logger.info("chat.retrieval.refined id=%s candidates=%s passages=%s chunks=%s document_level=%s",
                      ctx.request_id, len(state["matches"]), len(passages),
                      retrieval.chunk_count(passages), document_level)
-    next_step = "study_sheet" if sheets.is_notes(state["route"].tool.id) else "generate"
+    tool_id = state["route"].tool.id
+    next_step = ("study_sheet" if sheets.is_notes(tool_id)
+                 else "practice_quiz" if quizzes.is_quiz(tool_id) else "generate")
     return {**update, "matches": passages, "next_step": next_step}
 
 
 def after_refine(state: RagState) -> str:
-    """Edge: generate, or study_sheet for /notes."""
+    """Edge: generate, study_sheet for /notes, or practice_quiz for /quiz."""
     return state["next_step"]
 
 
@@ -378,6 +381,67 @@ async def study_sheet(state: RagState, runtime: Runtime[RagContext]) -> dict:
         return {**limited, "llm_calls": 1}
     return {"study_sheet": sheet, "context": context, "sources": sources, "answer": "",
             "outcome": "study_sheet", "llm_calls": 1}
+
+
+async def practice_quiz(state: RagState, runtime: Runtime[RagContext]) -> dict:
+    """/quiz: check the material can support 10 questions, then generate and validate the quiz.
+
+    Too little material (by the deterministic minimum or the model's judgement)
+    offers a broader topic on a normal search (needs_expansion) and is reported
+    honestly after a broadened one (insufficient). An invalid quiz is retried
+    once with the reason; a second invalid quiz ends as quiz_failed. Only counts
+    are logged, never quiz content.
+    """
+    ctx = runtime.context
+    settings = get_settings()
+    matches = state["matches"]
+    question = state["route"].question
+    expanded = bool(state.get("expanded"))
+
+    def limited(supported: int, topic: str, llm_calls: int = 0) -> dict:
+        chat_logger.info("chat.quiz.limited id=%s chunks=%s expanded=%s supported=%s",
+                         ctx.request_id, len(matches), expanded, supported)
+        update = {"matches": [], "sources": [], "context": "", "quiz": None,
+                  "broader_topic": "" if expanded else topic,
+                  "answer": (quizzes.still_limited_message(question) if expanded
+                             else quizzes.ask_to_expand_message(question, supported, topic)),
+                  "outcome": "insufficient" if expanded else "needs_expansion"}
+        return {**update, "llm_calls": llm_calls} if llm_calls else update
+
+    if not quizzes.enough_material(matches, settings):
+        return limited(quizzes.estimated_questions(matches, settings), quizzes.broader_topic(matches))
+
+    context, sources = retrieval.build_context_and_sources(matches)
+    history = state.get("history", [])
+    problem, calls = "", 0
+    for attempt in (1, 2):  # first try plus one retry on an invalid quiz
+        started = time.perf_counter()
+        chat_logger.info("chat.llm.start id=%s provider=%s model=%s task=practice_quiz attempt=%s",
+                         ctx.request_id, ctx.provider, ctx.model, attempt)
+        # Uses the original (or approved broader) topic, never the rewritten search query.
+        draft = await quizzes.generate_draft(question, context, history, ctx.provider, ctx.model,
+                                             ctx.fallback, problem=problem)
+        calls += 1
+        chat_logger.info("chat.llm.finish id=%s task=practice_quiz coverage=%s questions=%s "
+                         "duration_ms=%.2f", ctx.request_id, draft.coverage, len(draft.questions),
+                         (time.perf_counter() - started) * 1000)
+        if draft.is_limited():
+            supported = max(0, min(quizzes.QUESTION_COUNT - 1, draft.supported_questions))
+            topic = quizzes.clean_topic(draft.broader_topic) or quizzes.broader_topic(matches)
+            return limited(supported, topic, calls)
+        try:
+            quiz = quizzes.build_quiz(draft, matches, question)
+        except ValidationError as exc:
+            problem = quizzes.describe_problem(exc)
+            chat_logger.warning("chat.quiz.invalid id=%s attempt=%s errors=%s",
+                                ctx.request_id, attempt, exc.error_count())
+            continue
+        cited = quizzes.cited_pages(quiz)
+        used = [source for source in sources if (source.filename, source.page) in cited]
+        return {"quiz": quiz, "context": context, "sources": used or sources,
+                "answer": quizzes.ready_message(quiz.title), "outcome": "quiz", "llm_calls": calls}
+    return {"matches": [], "sources": [], "context": "", "quiz": None,
+            "answer": quizzes.failed_message(), "outcome": "quiz_failed", "llm_calls": calls}
 
 
 async def generate(state: RagState, runtime: Runtime[RagContext]) -> dict:

@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.schemas import ChatRequest, ChatResponse, DownloadItem, ImageItem, PendingAction
 from app.security import RequireApiKey
 from app.services import llm_provider, pending_actions, retrieval, temp_files
+from app.services import practice_quiz as quizzes
 from app.services import study_sheet as sheets
 from app.services.llm_provider import ProviderError
 from app.services.illustrations import generate_illustration_async
@@ -91,27 +92,45 @@ async def _illustrate(route: RouteResult, question: str, answer: str, context: s
 
 
 def _resolve_pending(request: ChatRequest, request_id: str) -> RouteResult | str:
-    """Answer to a widen-search question: the route to re-run, or the reply to send.
+    """Answer to a widen-search / broaden-topic question: the route to re-run, or the reply.
 
-    Approval re-runs the question stored in the signed token, never the request
-    text, so only the original /notes request can be repeated, and only for its
-    own course and user. Decline, or an invalid/expired token, returns a reply.
+    Approval re-runs the request stored in the signed token, never the request
+    text, so only the original /notes or /quiz request can be repeated (a /quiz
+    approval searches the broader topic signed into the token), and only for
+    its own course and user. Each action type is accepted only for its own
+    tool. Decline, or an invalid/expired token, returns a reply.
     """
-    try:
-        pending = pending_actions.verify(request.pending_action_token or "", sheets.EXPAND_ACTION,
-                                         course_id=request.course_id, user_id=request.user_id)
-    except pending_actions.PendingActionError as exc:
-        logger.info("chat.pending.invalid id=%s reason=%s", request_id, exc)
-        return sheets.expired_request_message()
-    if not sheets.is_notes(pending.tool_id):
+    token = request.pending_action_token or ""
+    pending, reason = None, None
+    expired_message = sheets.expired_request_message()
+    for action in (sheets.EXPAND_ACTION, quizzes.EXPAND_ACTION):
+        try:
+            pending = pending_actions.verify(token, action, course_id=request.course_id,
+                                             user_id=request.user_id)
+            break
+        except pending_actions.PendingActionExpired as exc:
+            # Genuine token of this action, just too old: word the reply for its command.
+            reason = exc
+            if action == quizzes.EXPAND_ACTION:
+                expired_message = quizzes.expired_request_message()
+            break
+        except pending_actions.PendingActionError as exc:
+            reason = exc
+    if pending is None:
+        logger.info("chat.pending.invalid id=%s reason=%s", request_id, reason)
+        return expired_message
+
+    quiz_action = pending.action == quizzes.EXPAND_ACTION
+    allowed = quizzes.is_quiz if quiz_action else sheets.is_notes
+    if not allowed(pending.tool_id):
         logger.warning("chat.pending.invalid id=%s reason=unexpected_tool", request_id)
-        return sheets.expired_request_message()
+        return quizzes.expired_request_message() if quiz_action else sheets.expired_request_message()
     if request.pending_decision != "approve":
-        logger.info("chat.pending.declined id=%s", request_id)
-        return sheets.declined_message()
-    logger.info("chat.pending.approved id=%s", request_id)
-    return RouteResult(tool=get_tool(pending.tool_id), question=pending.question,
-                       explicit_command=True)
+        logger.info("chat.pending.declined id=%s action=%s", request_id, pending.action)
+        return quizzes.declined_message(pending.topic) if quiz_action else sheets.declined_message()
+    logger.info("chat.pending.approved id=%s action=%s", request_id, pending.action)
+    question = (pending.topic or pending.question) if quiz_action else pending.question
+    return RouteResult(tool=get_tool(pending.tool_id), question=question, explicit_command=True)
 
 
 async def _study_sheet_response(result: dict, request: ChatRequest, request_id: str,
@@ -163,8 +182,9 @@ async def ask(request: ChatRequest, http_request: Request):
     graph with the request's access scope and Moodle-selected model, and add an
     illustration for ``/explain`` when the model judges one helpful. Conversational and no-context replies return
     no sources. ``/notes`` returns a study sheet PDF as ``download``, or a
-    ``pending_action`` asking to widen a thin search; the reply to that action
-    arrives as ``pending_action_token`` + ``pending_decision``.
+    ``pending_action`` asking to widen a thin search; ``/quiz`` returns a
+    10-question ``quiz``, or a ``pending_action`` offering a broader topic. The
+    reply to an action arrives as ``pending_action_token`` + ``pending_decision``.
     Errors: 502 provider failure, 422 invalid input, 500 otherwise.
     """
     settings = get_settings()
@@ -184,7 +204,8 @@ async def ask(request: ChatRequest, http_request: Request):
     try:
         expanded = False
         if request.pending_decision is not None:
-            # The student answered an earlier "widen the /notes search?" question.
+            # The student answered an earlier "widen the /notes search?" or
+            # "broaden the /quiz topic?" question.
             route = _resolve_pending(request, request_id)
             if isinstance(route, str):
                 return ChatResponse(answer=route, sources=[])
@@ -229,18 +250,34 @@ async def ask(request: ChatRequest, http_request: Request):
         context = result.get("context", "")
         if result.get("outcome") == "study_sheet":
             return await _study_sheet_response(result, request, request_id, request_started)
-        if result.get("outcome") == "needs_expansion":
-            token, expires_at = pending_actions.issue(
-                sheets.EXPAND_ACTION, course_id=request.course_id, user_id=request.user_id,
-                question=question, tool_id=route.tool.id,
-            )
-            logger.info("chat.finish id=%s outcome=needs_expansion total_ms=%.2f", request_id,
+        if result.get("outcome") == "quiz":
+            logger.info("chat.finish id=%s outcome=quiz total_ms=%.2f", request_id,
                         (time.perf_counter() - request_started) * 1000)
+            return ChatResponse(
+                answer=answer,
+                sources=result["sources"],
+                retrieved_chunks=retrieval.chunk_count(matches),
+                retrieved_contexts=[match["text"] for match in matches],
+                quiz=result["quiz"],
+            )
+        if result.get("outcome") == "needs_expansion":
+            if quizzes.is_quiz(route.tool.id):
+                action, topic = quizzes.EXPAND_ACTION, result.get("broader_topic", "")
+                labels = ("Yes, broaden the topic", "No, don't create it")
+            else:
+                action, topic = sheets.EXPAND_ACTION, ""
+                labels = ("Yes, search more widely", "No, cancel")
+            token, expires_at = pending_actions.issue(
+                action, course_id=request.course_id, user_id=request.user_id,
+                question=question, tool_id=route.tool.id, topic=topic,
+            )
+            logger.info("chat.finish id=%s outcome=needs_expansion action=%s total_ms=%.2f",
+                        request_id, action, (time.perf_counter() - request_started) * 1000)
             return ChatResponse(
                 answer=answer, sources=[], retrieved_chunks=0, retrieved_contexts=[],
                 pending_action=PendingAction(
-                    type=sheets.EXPAND_ACTION, token=token, expires_at=expires_at,
-                    approve_label="Yes, search more widely", decline_label="No, cancel",
+                    type=action, token=token, expires_at=expires_at,
+                    approve_label=labels[0], decline_label=labels[1],
                 ),
             )
         if result.get("outcome") != "answered":

@@ -123,6 +123,11 @@ class Settings(BaseSettings):
     notes_min_chunks: int = 3
     notes_min_context_chars: int = 1200
     notes_expanded_top_k: int = 20
+    # /quiz practice quizzes (10 questions). Below these minimums the student is
+    # asked whether to broaden the topic (the widened search reuses
+    # notes_expanded_top_k, still within the same course).
+    quiz_min_chunks: int = 4
+    quiz_min_context_chars: int = 2000
     # Generated files (study sheet PDFs) are temporary: deleted after this many
     # minutes. Expired files are swept every generated_files_cleanup_seconds.
     study_sheet_ttl_minutes: int = 60

@@ -2,6 +2,8 @@
 from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
+from app.services.practice_quiz import PracticeQuiz
+
 class ChatHistoryMessage(BaseModel):
     """One earlier turn of the conversation, as sent by Moodle."""
     role: Literal["user", "assistant"]
@@ -86,13 +88,15 @@ class ChatResponse(BaseModel):
     pending_action: "PendingAction | None" = None
     # Figures from the course documents behind the answer; omitted when there are none.
     images: "list[ImageItem] | None" = None
+    # /quiz: 10 multiple-choice questions Moodle renders as an interactive card.
+    quiz: "PracticeQuiz | None" = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_extras(self, handler):
-        """Leave ``download``/``pending_action``/``images`` out when unset or empty, so
-        every other reply is serialised exactly as before these fields existed."""
+        """Leave ``download``/``pending_action``/``images``/``quiz`` out when unset or empty,
+        so every other reply is serialised exactly as before these fields existed."""
         data = handler(self)
-        for key in ("download", "pending_action", "images"):
+        for key in ("download", "pending_action", "images", "quiz"):
             if not data.get(key):
                 data.pop(key, None)
         return data
@@ -132,7 +136,7 @@ class PendingAction(BaseModel):
 
     Send ``token`` back as ``pending_action_token`` with ``pending_decision``.
     """
-    type: Literal["expand_notes_search"]
+    type: Literal["expand_notes_search", "expand_quiz_scope"]
     token: str
     expires_at: int
     approve_label: str
