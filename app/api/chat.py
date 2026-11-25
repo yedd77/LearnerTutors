@@ -185,6 +185,8 @@ async def ask(request: ChatRequest, http_request: Request):
     ``pending_action`` asking to widen a thin search; ``/quiz`` returns a
     10-question ``quiz``, or a ``pending_action`` offering a broader topic. The
     reply to an action arrives as ``pending_action_token`` + ``pending_decision``.
+    ``/flashcards`` returns a 3-15 card ``flashcards`` deck, or a plain-text reply
+    when the material is too thin (no pending action, no illustration).
     Errors: 502 provider failure, 422 invalid input, 500 otherwise.
     """
     settings = get_settings()
@@ -259,6 +261,16 @@ async def ask(request: ChatRequest, http_request: Request):
                 retrieved_chunks=retrieval.chunk_count(matches),
                 retrieved_contexts=[match["text"] for match in matches],
                 quiz=result["quiz"],
+            )
+        if result.get("outcome") == "flashcards":
+            logger.info("chat.finish id=%s outcome=flashcards total_ms=%.2f", request_id,
+                        (time.perf_counter() - request_started) * 1000)
+            return ChatResponse(
+                answer=answer,
+                sources=result["sources"],
+                retrieved_chunks=retrieval.chunk_count(matches),
+                retrieved_contexts=[match["text"] for match in matches],
+                flashcards=result["flashcards"],
             )
         if result.get("outcome") == "needs_expansion":
             if quizzes.is_quiz(route.tool.id):

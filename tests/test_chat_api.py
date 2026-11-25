@@ -234,8 +234,42 @@ def test_removed_extract_tool_id_is_422(client, auth, stub_generation):
 
 
 def test_explicit_tool_id_is_honoured(client, auth, stub_generation, bio):
-    ask(client, auth, "make something", tool_id="flashcards")
-    assert stub_generation.calls[0]["route"].tool.id == "flashcards"
+    # /flashcards now has its own structured node (tests/test_flashcards.py), so use a
+    # tool that still goes through plain generation.
+    ask(client, auth, "make something", tool_id="study_guide")
+    assert stub_generation.calls[0]["route"].tool.id == "study_guide"
+
+
+def test_flashcards_reply_is_a_structured_deck(client, auth, stub_generation, monkeypatch):
+    import app.services.llm_provider as llm_provider
+    from app.services import flashcards as decks
+
+    facts = ["Mitochondria produce most of the cell's ATP through cellular respiration.",
+             "Cellular respiration in mitochondria uses oxygen and glucose to release energy.",
+             "The inner mitochondria membrane folds into cristae where respiration makes ATP."]
+    for i, fact in enumerate(facts):
+        index_text(f"cells{i}", " ".join([fact] * 5), filename="Week 2 - Cell Biology.pdf", page=14)
+    draft = decks.FlashcardDraft(title="Cell structure", cards=[
+        {"front": f"Cell question {i}?", "back": f"Cell answer {i}.", "source": "S1"}
+        for i in range(5)])
+
+    async def fake_structured(messages, schema, provider=None, model=None, **kwargs):
+        assert schema is decks.FlashcardDraft
+        return draft
+
+    monkeypatch.setattr(llm_provider, "generate_structured", fake_structured)
+    response = ask(client, auth, "/flashcards mitochondria cell respiration")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] == "Here are 5 flashcards on Cell structure. Tap a card to see the answer."
+    assert body["flashcards"]["title"] == "Cell structure"
+    first = body["flashcards"]["cards"][0]
+    assert first == {"front": "Cell question 0?", "back": "Cell answer 0.",
+                     "source": {"filename": "Week 2 - Cell Biology.pdf", "page": 14}}
+    assert "Cell question" not in body["answer"] and "Cell answer" not in body["answer"]
+    assert stub_generation.calls == []      # no plain Markdown generation any more
+    # Other tools' replies never carry the key.
+    assert "flashcards" not in ask(client, auth, "/summarize mitochondria").json()
 
 
 def test_command_without_a_request_is_422(client, auth, stub_generation):

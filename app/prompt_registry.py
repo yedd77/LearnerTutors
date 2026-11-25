@@ -69,6 +69,7 @@ TOOLS: dict[str, ToolDefinition] = {
         prompt_file="flashcards.md",
         command="/flashcards",
         retrieval_mode="course_rag",
+        top_k=10,  # enough distinct passages for a 15-card deck
         aliases=("flashcard", "cards"),
     ),
     "concept_explanation": ToolDefinition(

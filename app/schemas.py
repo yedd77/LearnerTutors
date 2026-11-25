@@ -2,6 +2,7 @@
 from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
+from app.services.flashcards import FlashcardDeck
 from app.services.practice_quiz import PracticeQuiz
 
 class ChatHistoryMessage(BaseModel):
@@ -90,13 +91,15 @@ class ChatResponse(BaseModel):
     images: "list[ImageItem] | None" = None
     # /quiz: 10 multiple-choice questions Moodle renders as an interactive card.
     quiz: "PracticeQuiz | None" = None
+    # /flashcards: a revision deck Moodle renders as interactive flip cards.
+    flashcards: "FlashcardDeck | None" = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_extras(self, handler):
-        """Leave ``download``/``pending_action``/``images``/``quiz`` out when unset or empty,
-        so every other reply is serialised exactly as before these fields existed."""
+        """Leave ``download``/``pending_action``/``images``/``quiz``/``flashcards`` out when
+        unset or empty, so every other reply is serialised exactly as before these fields existed."""
         data = handler(self)
-        for key in ("download", "pending_action", "images", "quiz"):
+        for key in ("download", "pending_action", "images", "quiz", "flashcards"):
             if not data.get(key):
                 data.pop(key, None)
         return data

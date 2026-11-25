@@ -14,6 +14,7 @@ from app.prompt_registry import PROMPT_DIR
 from app.rag_graph.context import RagContext
 from app.rag_graph.state import RagState
 from app.services import document_images, llm_provider, retrieval, vector_store
+from app.services import flashcards as decks
 from app.services import practice_quiz as quizzes
 from app.services import study_sheet as sheets
 
@@ -335,12 +336,13 @@ async def refine(state: RagState, runtime: Runtime[RagContext]) -> dict:
                      retrieval.chunk_count(passages), document_level)
     tool_id = state["route"].tool.id
     next_step = ("study_sheet" if sheets.is_notes(tool_id)
-                 else "practice_quiz" if quizzes.is_quiz(tool_id) else "generate")
+                 else "practice_quiz" if quizzes.is_quiz(tool_id)
+                 else "flashcards" if decks.is_flashcards(tool_id) else "generate")
     return {**update, "matches": passages, "next_step": next_step}
 
 
 def after_refine(state: RagState) -> str:
-    """Edge: generate, study_sheet for /notes, or practice_quiz for /quiz."""
+    """Edge: generate, study_sheet for /notes, practice_quiz for /quiz or flashcards for /flashcards."""
     return state["next_step"]
 
 
@@ -442,6 +444,60 @@ async def practice_quiz(state: RagState, runtime: Runtime[RagContext]) -> dict:
                 "answer": quizzes.ready_message(quiz.title), "outcome": "quiz", "llm_calls": calls}
     return {"matches": [], "sources": [], "context": "", "quiz": None,
             "answer": quizzes.failed_message(), "outcome": "quiz_failed", "llm_calls": calls}
+
+
+async def flashcards(state: RagState, runtime: Runtime[RagContext]) -> dict:
+    """/flashcards: check there is enough material, then generate and validate the deck.
+
+    The deck has 3 to the requested number of cards (default 5, at most 15).
+    Too little material, by the deterministic minimum or a limited draft with
+    fewer than 3 cards, is reported honestly (insufficient); there is no
+    pending action. An invalid deck is retried once with the reason; a second
+    invalid deck ends as flashcards_failed. Only counts are logged, never card text.
+    """
+    ctx = runtime.context
+    settings = get_settings()
+    matches = state["matches"]
+    question = state["route"].question          # never the rewritten search query
+    requested = decks.requested_count(question)
+    limited = {"matches": [], "sources": [], "context": "", "flashcards": None,
+               "answer": decks.limited_message(question), "outcome": "insufficient"}
+    if not decks.enough_material(matches, settings):
+        chat_logger.info("chat.flashcards.limited id=%s chunks=%s reason=too_little",
+                         ctx.request_id, len(matches))
+        return limited
+
+    context, sources = retrieval.build_context_and_sources(matches)
+    history = state.get("history", [])
+    problem, calls = "", 0
+    for attempt in (1, 2):  # first try plus one retry on an invalid deck
+        started = time.perf_counter()
+        chat_logger.info("chat.llm.start id=%s provider=%s model=%s task=flashcards attempt=%s "
+                         "requested=%s", ctx.request_id, ctx.provider, ctx.model, attempt, requested)
+        draft = await decks.generate_draft(question, context, history, requested, ctx.provider,
+                                           ctx.model, ctx.fallback, problem=problem)
+        calls += 1
+        chat_logger.info("chat.llm.finish id=%s task=flashcards coverage=%s cards=%s "
+                         "duration_ms=%.2f", ctx.request_id, draft.coverage, len(draft.cards),
+                         (time.perf_counter() - started) * 1000)
+        if draft.coverage == "limited" and len(draft.cards) < decks.MIN_CARDS:
+            chat_logger.info("chat.flashcards.limited id=%s chunks=%s reason=model",
+                             ctx.request_id, len(matches))
+            return {**limited, "llm_calls": calls}
+        try:
+            deck = decks.build_deck(draft, matches, question, requested)
+        except ValidationError as exc:
+            problem = decks.describe_problem(exc)
+            chat_logger.warning("chat.flashcards.invalid id=%s attempt=%s errors=%s",
+                                ctx.request_id, attempt, exc.error_count())
+            continue
+        cited = decks.cited_pages(deck)
+        used = [source for source in sources if (source.filename, source.page) in cited]
+        return {"flashcards": deck, "context": context, "sources": used or sources,
+                "answer": decks.ready_message(deck.title, len(deck.cards)),
+                "outcome": "flashcards", "llm_calls": calls}
+    return {"matches": [], "sources": [], "context": "", "flashcards": None,
+            "answer": decks.failed_message(), "outcome": "flashcards_failed", "llm_calls": calls}
 
 
 async def generate(state: RagState, runtime: Runtime[RagContext]) -> dict:

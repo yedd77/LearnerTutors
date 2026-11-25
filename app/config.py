@@ -128,6 +128,10 @@ class Settings(BaseSettings):
     # notes_expanded_top_k, still within the same course).
     quiz_min_chunks: int = 4
     quiz_min_context_chars: int = 2000
+    # /flashcards decks. Below these minimums the student gets an honest "not enough
+    # material" reply instead of a deck.
+    flashcards_min_chunks: int = 2
+    flashcards_min_context_chars: int = 800
     # Generated files (study sheet PDFs) are temporary: deleted after this many
     # minutes. Expired files are swept every generated_files_cleanup_seconds.
     study_sheet_ttl_minutes: int = 60

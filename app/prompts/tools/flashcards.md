@@ -1,3 +1,4 @@
+<!-- Not used for /flashcards any more: it now uses graph/flashcards.md through the flashcards graph node. Kept because the tool registry still names this file. -->
 # Task: Generate flashcards
 Create revision flashcards from the supplied course material.
 - Each card should test one important concept.

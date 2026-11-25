@@ -19,6 +19,11 @@ too thin, asks to widen the search (needs_expansion) or reports it (insufficient
 /quiz (practice_quiz): grade ─relevant─► refine ─► practice_quiz ─► finalize. practice_quiz
 produces a validated PracticeQuiz (one retry on an invalid quiz, else quiz_failed) or, when
 the material is too thin, offers a broader topic (needs_expansion) or reports it (insufficient).
+
+/flashcards (flashcards): grade ─relevant─► refine ─► flashcards ─► finalize. flashcards
+produces a validated FlashcardDeck of 3 to the requested number of cards (one retry on an
+invalid deck, else flashcards_failed); too little material is reported (insufficient), with
+no pending action.
 """
 import functools
 import logging
@@ -54,8 +59,8 @@ def build_graph():
     """Wire the nodes and conditional edges shown in the module docstring and compile the graph."""
     graph = StateGraph(RagState, context_schema=RagContext)
     for name in ("classify", "conversational_reply", "rewrite_query", "retrieve", "grade",
-                 "refine", "generate", "validate", "study_sheet", "practice_quiz", "no_context",
-                 "finalize"):
+                 "refine", "generate", "validate", "study_sheet", "practice_quiz", "flashcards",
+                 "no_context", "finalize"):
         graph.add_node(name, _timed(name, getattr(nodes, name)))
     graph.add_edge(START, "classify")
     graph.add_conditional_edges("classify", nodes.after_classify,
@@ -66,12 +71,13 @@ def build_graph():
     graph.add_conditional_edges("grade", nodes.after_grade,
                                 ["refine", "rewrite_query", "no_context"])
     graph.add_conditional_edges("refine", nodes.after_refine,
-                                ["generate", "study_sheet", "practice_quiz"])
+                                ["generate", "study_sheet", "practice_quiz", "flashcards"])
     graph.add_edge("generate", "validate")
     graph.add_edge("validate", "finalize")
     graph.add_edge("no_context", "finalize")
     graph.add_edge("study_sheet", "finalize")
     graph.add_edge("practice_quiz", "finalize")
+    graph.add_edge("flashcards", "finalize")
     graph.add_edge("finalize", END)
     return graph.compile()
 

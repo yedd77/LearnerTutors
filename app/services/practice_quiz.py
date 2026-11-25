@@ -135,17 +135,27 @@ def is_quiz(tool_id: str) -> bool:
     return tool_id == QUIZ_TOOL_ID
 
 
-def _passage_sources(matches: list[dict]) -> dict[int, QuizSource]:
-    """Passage number (the n in [Sn]) → its file and page, as numbered in the context."""
+def _passage_sources(matches: list[dict], model: type[BaseModel] = QuizSource) -> dict[int, BaseModel]:
+    """Passage number (the n in [Sn]) → its file and page, as numbered in the context.
+
+    ``model`` is the source class to build (``filename``/``page`` fields), so
+    /flashcards can reuse this with its own source model.
+    """
     sources = {}
     for number, match in enumerate(matches, 1):
         metadata = match.get("metadata", {})
         filename = _clean(metadata.get("filename", ""))[:255]
         page = metadata.get("page", -1)
         if filename:
-            sources[number] = QuizSource(filename=filename,
-                                         page=page if isinstance(page, int) and page > 0 else None)
+            sources[number] = model(filename=filename,
+                                    page=page if isinstance(page, int) and page > 0 else None)
     return sources
+
+
+def _source_for(marker: str, sources: dict[int, BaseModel]) -> BaseModel | None:
+    """The source a passage marker such as "S3" names, or None if it names no shown passage."""
+    found = _MARKER.search(marker or "")
+    return sources.get(int(found.group(1))) if found else None
 
 
 def _spread_answers(quiz: PracticeQuiz) -> PracticeQuiz:
@@ -174,15 +184,10 @@ def build_quiz(draft: QuizDraft, matches: list[dict], fallback_title: str) -> Pr
     shown; anything else leaves the question without a source.
     """
     sources = _passage_sources(matches)
-
-    def source(marker: str) -> QuizSource | None:
-        found = _MARKER.search(marker or "")
-        return sources.get(int(found.group(1))) if found else None
-
     quiz = PracticeQuiz(
         title=_clean(draft.title) or _clean(fallback_title)[:160],
         questions=[{"question": q.question, "options": q.options, "answer_index": q.answer_index,
-                    "explanation": q.explanation, "source": source(q.source)}
+                    "explanation": q.explanation, "source": _source_for(q.source, sources)}
                    for q in draft.questions],
     )
     return _spread_answers(quiz)
