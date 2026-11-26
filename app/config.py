@@ -132,9 +132,14 @@ class Settings(BaseSettings):
     # material" reply instead of a deck.
     flashcards_min_chunks: int = 2
     flashcards_min_context_chars: int = 800
-    # Generated files (study sheet PDFs) are temporary: deleted after this many
-    # minutes. Expired files are swept every generated_files_cleanup_seconds.
+    # /exam papers in a course with past-paper blueprints. Below these minimums the
+    # student gets an honest "not enough material" reply instead of a paper.
+    exam_min_chunks: int = 4
+    exam_min_context_chars: int = 2500
+    # Generated files (study sheet and exam paper PDFs) are temporary: deleted after
+    # this many minutes. Expired files are swept every generated_files_cleanup_seconds.
     study_sheet_ttl_minutes: int = 60
+    exam_paper_ttl_minutes: int = 60
     generated_files_cleanup_seconds: int = 300
     # How long a "widen the search?" confirmation stays valid.
     pending_action_ttl_minutes: int = 30
