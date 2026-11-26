@@ -24,6 +24,12 @@ the material is too thin, offers a broader topic (needs_expansion) or reports it
 produces a validated FlashcardDeck of 3 to the requested number of cards (one retry on an
 invalid deck, else flashcards_failed); too little material is reported (insufficient), with
 no pending action.
+
+/exam (exam_generation) in a course with enabled past-paper blueprints: grade ─relevant─► refine
+─► exam_paper ─► finalize. refine merges the course's blueprints (exam_plan); exam_paper writes
+a new paper in that structure (one retry on an invalid paper, else exam_failed) and the endpoint
+renders the PDF; too little material is reported (insufficient). Without blueprints /exam takes
+the normal generate path.
 """
 import functools
 import logging
@@ -60,7 +66,7 @@ def build_graph():
     graph = StateGraph(RagState, context_schema=RagContext)
     for name in ("classify", "conversational_reply", "rewrite_query", "retrieve", "grade",
                  "refine", "generate", "validate", "study_sheet", "practice_quiz", "flashcards",
-                 "no_context", "finalize"):
+                 "exam_paper", "no_context", "finalize"):
         graph.add_node(name, _timed(name, getattr(nodes, name)))
     graph.add_edge(START, "classify")
     graph.add_conditional_edges("classify", nodes.after_classify,
@@ -71,13 +77,15 @@ def build_graph():
     graph.add_conditional_edges("grade", nodes.after_grade,
                                 ["refine", "rewrite_query", "no_context"])
     graph.add_conditional_edges("refine", nodes.after_refine,
-                                ["generate", "study_sheet", "practice_quiz", "flashcards"])
+                                ["generate", "study_sheet", "practice_quiz", "flashcards",
+                                 "exam_paper"])
     graph.add_edge("generate", "validate")
     graph.add_edge("validate", "finalize")
     graph.add_edge("no_context", "finalize")
     graph.add_edge("study_sheet", "finalize")
     graph.add_edge("practice_quiz", "finalize")
     graph.add_edge("flashcards", "finalize")
+    graph.add_edge("exam_paper", "finalize")
     graph.add_edge("finalize", END)
     return graph.compile()
 

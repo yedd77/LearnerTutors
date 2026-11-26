@@ -32,8 +32,10 @@ class RagState(TypedDict, total=False):
     quiz: Any                     # /quiz: validated PracticeQuiz
     broader_topic: str            # /quiz needs_expansion: topic offered to the student
     flashcards: Any               # /flashcards: validated FlashcardDeck
+    exam_plan: Any                # /exam: merged ExamBlueprint of the course's past papers
+    exam_paper: Any               # /exam: validated ExamPaper; the endpoint renders the PDF
     outcome: Literal["answered", "no_context", "conversational",
                      "study_sheet", "needs_expansion", "insufficient", "quiz", "quiz_failed",
-                     "flashcards", "flashcards_failed"]
+                     "flashcards", "flashcards_failed", "exam_paper", "exam_failed"]
     trace: Annotated[list[str], operator.add]
     llm_calls: Annotated[int, operator.add]

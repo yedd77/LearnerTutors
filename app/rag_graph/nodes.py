@@ -14,6 +14,8 @@ from app.prompt_registry import PROMPT_DIR
 from app.rag_graph.context import RagContext
 from app.rag_graph.state import RagState
 from app.services import document_images, llm_provider, retrieval, vector_store
+from app.services import exam_blueprint as blueprints
+from app.services import exam_paper as exams
 from app.services import flashcards as decks
 from app.services import practice_quiz as quizzes
 from app.services import study_sheet as sheets
@@ -338,11 +340,19 @@ async def refine(state: RagState, runtime: Runtime[RagContext]) -> dict:
     next_step = ("study_sheet" if sheets.is_notes(tool_id)
                  else "practice_quiz" if quizzes.is_quiz(tool_id)
                  else "flashcards" if decks.is_flashcards(tool_id) else "generate")
+    if exams.is_exam(tool_id):
+        # Past-paper blueprints are read for this request's course only (from
+        # runtime.context). Without any, /exam stays a normal chat answer.
+        plan = await loop.run_in_executor(executor, blueprints.course_plan, ctx.course_id)
+        if plan is not None:
+            next_step = "exam_paper"
+            update["exam_plan"] = plan
     return {**update, "matches": passages, "next_step": next_step}
 
 
 def after_refine(state: RagState) -> str:
-    """Edge: generate, study_sheet for /notes, practice_quiz for /quiz or flashcards for /flashcards."""
+    """Edge: generate, study_sheet for /notes, practice_quiz for /quiz, flashcards for
+    /flashcards, or exam_paper for /exam in a course with past papers."""
     return state["next_step"]
 
 
@@ -498,6 +508,60 @@ async def flashcards(state: RagState, runtime: Runtime[RagContext]) -> dict:
                 "outcome": "flashcards", "llm_calls": calls}
     return {"matches": [], "sources": [], "context": "", "flashcards": None,
             "answer": decks.failed_message(), "outcome": "flashcards_failed", "llm_calls": calls}
+
+
+async def exam_paper(state: RagState, runtime: Runtime[RagContext]) -> dict:
+    """/exam with past papers: write a new paper in the course's past-paper format.
+
+    Too little material, by the deterministic minimum or the model's judgement,
+    is reported honestly (insufficient); there is no pending action. A paper
+    that breaks the structure is retried once with the reason; a second
+    invalid paper ends as exam_failed. Only counts are logged, never questions.
+    The PDF is rendered by the chat endpoint, not here.
+    """
+    ctx = runtime.context
+    settings = get_settings()
+    matches = state["matches"]
+    plan = state["exam_plan"]
+    question = state["route"].question          # never the rewritten search query
+    limited = {"matches": [], "sources": [], "context": "", "exam_paper": None,
+               "answer": exams.limited_message(question), "outcome": "insufficient"}
+    if not exams.enough_material(matches, settings):
+        chat_logger.info("chat.exam.limited id=%s chunks=%s reason=too_little",
+                         ctx.request_id, len(matches))
+        return limited
+
+    context, sources = retrieval.build_context_and_sources(matches)
+    history = state.get("history", [])
+    problem, calls = "", 0
+    for attempt in (1, 2):  # first try plus one retry on an invalid paper
+        started = time.perf_counter()
+        chat_logger.info("chat.llm.start id=%s provider=%s model=%s task=exam_paper attempt=%s "
+                         "planned_questions=%s", ctx.request_id, ctx.provider, ctx.model, attempt,
+                         plan.question_count())
+        draft = await exams.generate_draft(question, context, history, plan, ctx.provider,
+                                           ctx.model, ctx.fallback, problem=problem)
+        calls += 1
+        chat_logger.info("chat.llm.finish id=%s task=exam_paper coverage=%s sections=%s "
+                         "custom=%s duration_ms=%.2f", ctx.request_id, draft.coverage,
+                         len(draft.sections), draft.custom_structure,
+                         (time.perf_counter() - started) * 1000)
+        if draft.coverage == "limited":
+            chat_logger.info("chat.exam.limited id=%s chunks=%s reason=model",
+                             ctx.request_id, len(matches))
+            return {**limited, "llm_calls": calls}
+        try:
+            paper = exams.build_paper(draft, plan, matches, question)
+        except (ValidationError, exams.ExamPaperInvalid) as exc:
+            problem = exams.describe_problem(exc)
+            chat_logger.warning("chat.exam.invalid id=%s attempt=%s", ctx.request_id, attempt)
+            continue
+        cited = exams.cited_pages(paper)
+        used = [source for source in sources if (source.filename, source.page) in cited]
+        return {"exam_paper": paper, "context": context, "sources": used or sources,
+                "answer": "", "outcome": "exam_paper", "llm_calls": calls}
+    return {"matches": [], "sources": [], "context": "", "exam_paper": None,
+            "answer": exams.failed_message(), "outcome": "exam_failed", "llm_calls": calls}
 
 
 async def generate(state: RagState, runtime: Runtime[RagContext]) -> dict:

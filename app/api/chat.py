@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.schemas import ChatRequest, ChatResponse, DownloadItem, ImageItem, PendingAction
 from app.security import RequireApiKey
 from app.services import llm_provider, pending_actions, retrieval, temp_files
+from app.services import exam_paper as exams
 from app.services import practice_quiz as quizzes
 from app.services import study_sheet as sheets
 from app.services.llm_provider import ProviderError
@@ -174,6 +175,48 @@ async def _study_sheet_response(result: dict, request: ChatRequest, request_id: 
     )
 
 
+async def _exam_paper_response(result: dict, request: ChatRequest, request_id: str,
+                               request_started: float) -> ChatResponse:
+    """Render the /exam practice paper PDF, store it temporarily and describe the download.
+
+    Same pattern as the study sheet: rendering runs in a worker thread, the
+    file is stored for this course and user only, and a rendering or storage
+    failure returns a polite message instead of an error. Only counts are logged.
+    """
+    from app.pdf.exam_paper import render_exam_paper
+
+    settings = get_settings()
+    paper, sources = result["exam_paper"], result["sources"]
+    matches = result.get("matches", [])
+    ttl_minutes = max(1, settings.exam_paper_ttl_minutes)
+    started = time.perf_counter()
+    try:
+        rendered = await asyncio.to_thread(render_exam_paper, paper, sources)
+        stored = await asyncio.to_thread(
+            temp_files.store, rendered.pdf, course_id=request.course_id,
+            user_id=request.user_id, filename=f"{paper.title} exam paper",
+            ttl_seconds=ttl_minutes * 60, kind="exam_paper",
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("chat.exam.render_failed id=%s", request_id)
+        return ChatResponse(answer=exams.render_failed_message(), sources=[])
+    logger.info("chat.exam.ready id=%s pages=%s questions=%s render_ms=%.2f total_ms=%.2f",
+                request_id, rendered.pages, paper.question_count(),
+                (time.perf_counter() - started) * 1000,
+                (time.perf_counter() - request_started) * 1000)
+    return ChatResponse(
+        answer=exams.ready_message(ttl_minutes, paper),
+        sources=sources,
+        retrieved_chunks=retrieval.chunk_count(matches),
+        retrieved_contexts=[match["text"] for match in matches],
+        download=DownloadItem(file_id=stored.file_id, filename=stored.filename,
+                              content_type=stored.content_type, expires_at=stored.expires_at,
+                              ttl_minutes=ttl_minutes, pages=rendered.pages),
+    )
+
+
 @router.post("", response_model=ChatResponse)
 async def ask(request: ChatRequest, http_request: Request):
     """Answer a student's message from the course documents via the RAG graph.
@@ -187,6 +230,8 @@ async def ask(request: ChatRequest, http_request: Request):
     reply to an action arrives as ``pending_action_token`` + ``pending_decision``.
     ``/flashcards`` returns a 3-15 card ``flashcards`` deck, or a plain-text reply
     when the material is too thin (no pending action, no illustration).
+    ``/exam`` in a course with past-paper blueprints returns a practice paper PDF
+    as ``download`` (no answer key); without blueprints it is a normal answer.
     Errors: 502 provider failure, 422 invalid input, 500 otherwise.
     """
     settings = get_settings()
@@ -252,6 +297,8 @@ async def ask(request: ChatRequest, http_request: Request):
         context = result.get("context", "")
         if result.get("outcome") == "study_sheet":
             return await _study_sheet_response(result, request, request_id, request_started)
+        if result.get("outcome") == "exam_paper":
+            return await _exam_paper_response(result, request, request_id, request_started)
         if result.get("outcome") == "quiz":
             logger.info("chat.finish id=%s outcome=quiz total_ms=%.2f", request_id,
                         (time.perf_counter() - request_started) * 1000)
