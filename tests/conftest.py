@@ -73,6 +73,7 @@ import app.config as config_module  # noqa: E402
 import app.services.document_images as document_images_module  # noqa: E402
 import app.services.illustrations as illustrations_module  # noqa: E402
 import app.services.temp_files as temp_files_module  # noqa: E402
+import app.services.exam_blueprint as exam_blueprint_module  # noqa: E402
 import app.services.vector_store as vector_store  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
 
@@ -132,6 +133,7 @@ def isolated_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(illustrations_module, "IMAGE_DIR", tmp_path / "illustrations")
     monkeypatch.setattr(document_images_module, "IMAGE_ROOT", tmp_path / "document_images")
     monkeypatch.setattr(temp_files_module, "GENERATED_DIR", tmp_path / "generated")
+    monkeypatch.setattr(exam_blueprint_module, "BLUEPRINT_ROOT", tmp_path / "exam_blueprints")
     reset_settings_cache()
     yield runtime_path
     reset_settings_cache()
