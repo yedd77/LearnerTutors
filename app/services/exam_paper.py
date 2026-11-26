@@ -40,6 +40,13 @@ def _clean(value) -> str:
     return " ".join(str(value).split()) if value is not None else ""
 
 
+def _same_key(value: str) -> str:
+    """Comparison key for duplicate checks: case, spacing and leading/trailing
+    punctuation ignored, so "Water." and "water" or two questions differing only by
+    "?" count as the same. Inner symbols are kept, so "x > y" and "x < y" differ."""
+    return " ".join(value.casefold().split()).strip(" .,;:!?\"'")
+
+
 class ExamPaperInvalid(ValueError):
     """The draft does not follow the required structure; the message says why (no content)."""
 
@@ -151,7 +158,7 @@ def _options(question: ExamDraftQuestion, question_type: str, count: int | None,
         raise ExamPaperInvalid(f"{where}: needs {MIN_CUSTOM_OPTIONS}-{MAX_CUSTOM_OPTIONS} options.")
     if any(not 1 <= len(option) <= 300 for option in options):
         raise ExamPaperInvalid(f"{where}: every option must be 1-300 characters.")
-    if len({option.casefold() for option in options}) != len(options):
+    if len({_same_key(option) for option in options}) != len(options):
         raise ExamPaperInvalid(f"{where}: options must all be different.")
     if any(quizzes._CATCH_ALL.match(option) for option in options):
         raise ExamPaperInvalid(f'{where}: options such as "All of the above" are not allowed.')
@@ -173,6 +180,8 @@ def _question(draft: ExamDraftQuestion, plan: BlueprintSection | None, question_
                             else None) for part in draft.subparts if _clean(part.text)]
     if question_type in ("mcq", "true_false"):
         subparts = []
+    if len({_same_key(part.text) for part in subparts}) != len(subparts):
+        raise ExamPaperInvalid(f"{where}: sub-parts must all be different.")
     expected = plan.subparts_per_question if plan else None
     if expected is not None:
         if expected == 0 and subparts:
@@ -256,7 +265,7 @@ def build_paper(draft: ExamDraft, plan: ExamBlueprint, matches: list[dict],
                 question_type=question_type,
                 subpart_style="a_b_c" if any(q.subparts for q in questions) else "none",
                 questions=questions))
-    texts = [question.text.casefold() for section in sections for question in section.questions]
+    texts = [_same_key(question.text) for section in sections for question in section.questions]
     if len(set(texts)) != len(texts):
         raise ExamPaperInvalid("The paper contains duplicate questions.")
     return ExamPaper(

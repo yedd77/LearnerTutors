@@ -145,3 +145,15 @@ def test_paper_uploaded_disabled_does_not_shape_exams(client, auth, analysis):
     upload(client, auth, document_role="past_exam", retrieval_enabled="false")
     assert eb.load_record(1, "paper-1")["enabled"] is False
     assert eb.course_plan(1) is None
+
+
+def test_conflict_found_at_save_time_is_409_and_keeps_this_courses_data(client, auth, analysis,
+                                                                          monkeypatch):
+    upload(client, auth, content=TEXT, document_id="doc-1", course_id=1)
+    # Simulate another course winning the claim between the early check and the save.
+    def lose(*args, **kwargs):
+        raise eb.BlueprintConflict("Document 'doc-1' belongs to another course.")
+    monkeypatch.setattr(eb, "save_blueprint", lose)
+    response = upload(client, auth, document_id="doc-1", course_id=1, document_role="past_exam")
+    assert response.status_code == 409
+    assert vs.get_document_retrieval_status("doc-1")["total_chunks"] == 1   # nothing removed

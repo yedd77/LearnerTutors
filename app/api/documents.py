@@ -253,10 +253,15 @@ def _index_past_exam(document_id: str, course_id: int, filename: str, content: b
                     "duration_ms=%.2f", document_id, len(blueprint.sections),
                     blueprint.question_count(), (time.perf_counter() - analysis_started) * 1000)
 
+    # Claim the id first: a concurrent upload of the same id to another course loses here (409)
+    # before anything of this course is removed.
+    try:
+        blueprints.save_blueprint(course_id, document_id, filename, sha256, blueprint, enabled)
+    except blueprints.BlueprintConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     # A past paper must never be searchable: drop any earlier course-material copy.
     removed = delete_document(document_id, course_id)
     document_images.delete_document_images(course_id, document_id)
-    blueprints.save_blueprint(course_id, document_id, filename, sha256, blueprint, enabled)
     logger.info("document.index.finish document=%s role=past_exam reused=%s removed_chunks=%s "
                 "total_ms=%.2f", document_id, reused, removed, (time.perf_counter() - started) * 1000)
     return IndexResponse(

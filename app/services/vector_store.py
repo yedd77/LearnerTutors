@@ -360,7 +360,6 @@ def get_retrieval_report() -> list[dict]:
                 entry["enabled_chunks"] += 1
 
         offset += len(ids)
-
     return sorted(
         docs.values(),
         key=lambda d: (

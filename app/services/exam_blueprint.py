@@ -18,7 +18,9 @@ import json
 import logging
 import os
 import statistics
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Literal
 
@@ -140,7 +142,12 @@ class ExamBlueprint(BaseModel):
         """Collapse whitespace, drop blanks, cap each at 300 characters."""
         if not isinstance(value, list):
             return value
-        cleaned = [_clean(item)[:300] for item in value if item is not None and _clean(item)]
+        cleaned, seen = [], set()
+        for item in value:
+            text = _clean(item)[:300] if item is not None else ""
+            if text and text.casefold() not in seen:      # a repeated instruction is printed once
+                seen.add(text.casefold())
+                cleaned.append(text)
         return cleaned[:6]
 
     @model_validator(mode="after")
@@ -171,6 +178,10 @@ class BlueprintAnalysis(BaseModel):
 
 class NotAnExamPaper(ValueError):
     """The uploaded document does not look like an exam paper."""
+
+
+class BlueprintConflict(ValueError):
+    """The document id already has a blueprint in another course."""
 
 
 # --------------------------------------------------------------------------- analysis
@@ -229,12 +240,21 @@ def content_hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+# Serialises check-then-write sequences (course claim, enable toggle) within this
+# process, so two concurrent requests for the same document cannot interleave.
+_WRITE_LOCK = threading.Lock()
+
+
 def _write_atomic(path: Path, data: bytes) -> None:
-    """Write via a temp file and rename, so readers never see a partial record."""
+    """Write via a uniquely named temp file and rename, so readers never see a
+    partial record and two concurrent writers never share a temp file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
+    tmp = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _read(path: Path) -> dict | None:
@@ -251,7 +271,12 @@ def _read(path: Path) -> dict | None:
 
 def save_blueprint(course_id: int, document_id: str, filename: str, sha256: str,
                    blueprint: ExamBlueprint, enabled: bool = True) -> None:
-    """Store (or replace) the blueprint of one past paper."""
+    """Store (or replace) the blueprint of one past paper.
+
+    Raises ``BlueprintConflict`` when another course already stored a blueprint
+    under this document id; the check and the write happen under one lock, so
+    two concurrent uploads cannot both claim the id.
+    """
     record = {
         "version": RECORD_VERSION,
         "course_id": int(course_id),
@@ -262,7 +287,11 @@ def save_blueprint(course_id: int, document_id: str, filename: str, sha256: str,
         "updated_at": time.time(),
         "blueprint": blueprint.model_dump(mode="json"),
     }
-    _write_atomic(_path(course_id, document_id), json.dumps(record).encode("utf-8"))
+    with _WRITE_LOCK:
+        owner = document_course(document_id)
+        if owner is not None and owner != int(course_id):
+            raise BlueprintConflict(f"Document '{document_id}' belongs to another course.")
+        _write_atomic(_path(course_id, document_id), json.dumps(record).encode("utf-8"))
 
 
 def load_record(course_id: int, document_id: str) -> dict | None:
@@ -295,12 +324,13 @@ def delete_blueprint(course_id: int, document_id: str) -> bool:
 
 def set_enabled(course_id: int, document_id: str, enabled: bool) -> bool:
     """Include or exclude a paper from /exam; True when the paper exists."""
-    record = load_record(course_id, document_id)
-    if record is None:
-        return False
-    record["enabled"] = bool(enabled)
-    record["updated_at"] = time.time()
-    _write_atomic(_path(course_id, document_id), json.dumps(record).encode("utf-8"))
+    with _WRITE_LOCK:  # read-modify-write: must not interleave with a re-upload
+        record = load_record(course_id, document_id)
+        if record is None:
+            return False
+        record["enabled"] = bool(enabled)
+        record["updated_at"] = time.time()
+        _write_atomic(_path(course_id, document_id), json.dumps(record).encode("utf-8"))
     return True
 
 
@@ -320,6 +350,8 @@ def course_blueprints(course_id: int) -> list[ExamBlueprint]:
     """This course's enabled blueprints, most recently updated first.
 
     Records of other courses, disabled papers and unreadable files are skipped.
+    The same file uploaded under several document ids counts once (newest
+    record kept), so a re-uploaded paper does not get double weight in the merge.
     """
     if not BLUEPRINT_ROOT.is_dir():
         return []
@@ -329,12 +361,17 @@ def course_blueprints(course_id: int) -> list[ExamBlueprint]:
         if not record or record.get("course_id") != int(course_id) or not record.get("enabled"):
             continue
         try:
-            found.append((float(record.get("updated_at", 0)),
+            found.append((float(record.get("updated_at", 0)), record.get("content_sha256") or path.name,
                           ExamBlueprint.model_validate(record.get("blueprint"))))
         except (ValidationError, TypeError, ValueError):
             logger.warning("exam_blueprint.invalid file=%s", path.name)
     found.sort(key=lambda item: item[0], reverse=True)
-    return [blueprint for _, blueprint in found]
+    unique, seen = [], set()
+    for _, key, blueprint in found:
+        if key not in seen:
+            seen.add(key)
+            unique.append(blueprint)
+    return unique
 
 
 # --------------------------------------------------------------------------- merge

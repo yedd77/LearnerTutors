@@ -145,3 +145,25 @@ def test_ready_message_never_mentions_answers_being_included():
     paper = ep.build_paper(draft(), PLAN, MATCHES, "cells")
     text = ep.ready_message(60, paper)
     assert "past papers" in text and "no answer key" in text and "1 hour" in text
+
+
+@pytest.mark.parametrize("mutate, problem", [
+    (lambda s: s[0]["questions"][1].update(text=s[0]["questions"][0]["text"].rstrip("?") + " "),
+     "duplicate"),
+    (lambda s: s[0]["questions"][0].update(options=["Water", "water.", "Salt", "Sugar"]), "different"),
+    (lambda s: s[1]["questions"][0]["subparts"][1].update(
+        text=s[1]["questions"][0]["subparts"][0]["text"].upper()), "sub-parts must all be different"),
+])
+def test_near_duplicates_are_rejected(mutate, problem):
+    sections = draft().model_dump()["sections"]
+    mutate(sections)
+    with pytest.raises(ep.ExamPaperInvalid) as exc:
+        ep.build_paper(draft(sections=sections), PLAN, MATCHES, "cells")
+    assert problem in str(exc.value)
+
+
+def test_options_differing_only_by_an_inner_symbol_are_allowed():
+    sections = draft().model_dump()["sections"]
+    sections[0]["questions"][0]["options"] = ["x > y", "x < y", "x = y", "x ≥ y"]
+    paper = ep.build_paper(draft(sections=sections), PLAN, MATCHES, "cells")
+    assert paper.sections[0].questions[0].options[0] == "x > y"

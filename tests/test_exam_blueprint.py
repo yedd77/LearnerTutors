@@ -183,3 +183,54 @@ def test_analysis_needs_a_configured_model_and_text(analysis_llm):
     with pytest.raises(llm_provider.ProviderError):
         eb.analyse_paper("past.pdf", SECTIONS)
     assert calls == []
+
+
+# --------------------------------------------------------------------------- duplicates
+def test_same_file_under_two_document_ids_counts_once_in_the_merge():
+    small = blueprint(section(question_count=10))
+    big = blueprint(section(question_count=40))
+    eb.save_blueprint(1, "doc-a", "a.pdf", "same-hash", big)
+    eb.save_blueprint(1, "doc-b", "a copy.pdf", "same-hash", big)     # re-uploaded as new doc
+    eb.save_blueprint(1, "doc-c", "c.pdf", "other-hash", small)
+    assert len(eb.course_blueprints(1)) == 2
+    assert eb.course_plan(1).question_count() == 25     # median of 10 and 40; with the duplicate it would be 40
+
+
+def test_a_document_id_cannot_be_claimed_by_a_second_course():
+    eb.save_blueprint(1, "doc-a", "a.pdf", "h", blueprint())
+    with pytest.raises(eb.BlueprintConflict):
+        eb.save_blueprint(2, "doc-a", "a.pdf", "h", blueprint())
+    assert eb.course_blueprints(2) == []
+    eb.save_blueprint(1, "doc-a", "a.pdf", "h2", blueprint())          # same course may replace
+
+
+def test_concurrent_saves_of_one_document_leave_one_valid_record():
+    from concurrent.futures import ThreadPoolExecutor
+    papers = [blueprint(section(question_count=n)) for n in range(1, 21)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda p: eb.save_blueprint(1, "doc-a", "a.pdf", f"h{p.question_count()}", p),
+                      papers))
+    files = list(eb.BLUEPRINT_ROOT.iterdir())
+    assert [f.suffix for f in files] == [".json"]                       # no temp files left behind
+    assert len(eb.course_blueprints(1)) == 1
+
+
+def test_concurrent_claims_from_two_courses_have_one_winner():
+    from concurrent.futures import ThreadPoolExecutor
+
+    def claim(course):
+        try:
+            eb.save_blueprint(course, "doc-x", "x.pdf", "h", blueprint())
+            return course
+        except eb.BlueprintConflict:
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        winners = {c for c in pool.map(claim, [1, 2] * 10) if c}
+    assert len(winners) == 1
+
+
+def test_repeated_general_instructions_are_kept_once():
+    paper = blueprint(general_instructions=["Answer ALL questions.", "answer all  questions.",
+                                            "Use black ink."])
+    assert paper.general_instructions == ["Answer ALL questions.", "Use black ink."]
