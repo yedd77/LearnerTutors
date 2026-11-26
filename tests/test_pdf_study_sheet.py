@@ -34,12 +34,21 @@ def all_text(doc) -> str:
     return " ".join(" ".join(page.get_text().split()) for page in doc)
 
 
-def font_sizes(doc) -> list[float]:
+_SCRIPT_CHARS = set("0123456789+-=()n")   # what components.rich() turns into <sub>/<super>
+
+
+def font_sizes(doc, skip_scripts: bool = False) -> list[float]:
     sizes = []
     for page in doc:
         for block in page.get_text("dict")["blocks"]:
             for line in block.get("lines", []):
-                sizes += [span["size"] for span in line["spans"] if span["text"].strip()]
+                spans = [span for span in line["spans"] if span["text"].strip()]
+                if skip_scripts:
+                    body = max((span["size"] for span in spans), default=0)
+                    spans = [span for span in spans
+                             if not (set(span["text"].strip()) <= _SCRIPT_CHARS
+                                     and span["size"] < body - 0.5)]
+                sizes += [span["size"] for span in spans]
     return sizes
 
 
@@ -68,8 +77,9 @@ def test_short_sheets_grow_and_body_text_is_never_below_the_minimum():
     long = sheet(main_points=[f"Point {i}: " + "aerobic respiration releases energy " * 6
                               for i in range(10)])
     for res in (result, render_study_sheet(long, SOURCES)):
-        sizes = font_sizes(pdf_doc(res))
-        # Footer text is the only text allowed below body size.
+        sizes = font_sizes(pdf_doc(res), skip_scripts=True)
+        # Footer text and sub/superscripts (e.g. the 2 in CO₂) are the only text
+        # allowed below body size.
         assert min(s for s in sizes if s > DEFAULT_THEME.footer_size + 0.1) >= DEFAULT_THEME.min_body_size - 0.01
 
 

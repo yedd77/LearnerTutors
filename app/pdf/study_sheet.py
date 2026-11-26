@@ -1,9 +1,9 @@
 """Render a ``StudySheet`` as an A4 revision sheet PDF.
 
-Layout (one page): header band, a full-width overview callout, the other
-sections as rounded cards in two balanced columns, a full-width summary, and a
-footer with sources, page number and branding. Only sections with content
-appear.
+Layout (one page): title with a teal rule, the overview as a lead paragraph,
+the other sections as open ruled blocks in two balanced columns ("Remember
+this" as the one coral callout), a full-width tinted summary, and a footer with
+sources, page number and branding. Only sections with content appear.
 
 Fitting: the page is tried at a few decreasing scales, but body text never
 goes below ``Theme.min_body_size``. If it still does not fit, nothing is cut:
@@ -15,6 +15,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.pdfgen import canvas as pdf_canvas
 from reportlab.platypus import BaseDocTemplate, Frame, NextPageTemplate, PageTemplate, Paragraph, Spacer
 
@@ -50,26 +51,36 @@ def _rows(key: str, sheet: StudySheet, theme: Theme, styles: ui.Styles) -> list:
         return ui.rich(value, styles.fonts)
 
     if key == "overview":
-        return [Paragraph(t(sheet.overview), styles.body)] if sheet.overview else []
+        return [Paragraph(t(sheet.overview), styles.lead)] if sheet.overview else []
+    # Definitions and formulas lead with a bold term, so they need no bullet.
     if key == "definitions":
-        return [Paragraph(f"<b>{t(d.term)}</b> — {t(d.meaning)}", bullet,
-                          bulletText="•") for d in sheet.definitions]
+        return [Paragraph(f"<b>{t(d.term)}:</b> {t(d.meaning)}", styles.body)
+                for d in sheet.definitions]
     if key == "formulas":
+        # Extra leading so sub/superscripts do not touch the meaning line below.
+        formula = ParagraphStyle("formula", parent=styles.body,
+                                 leading=styles.body.fontSize * 1.55)
         return [Paragraph(f"<b>{t(f.expression)}</b>"
                           + (f"<br/><font color='{muted}'>{t(f.meaning)}</font>"
-                             if f.meaning else ""), bullet, bulletText="•")
+                             if f.meaning else ""), formula)
                 for f in sheet.formulas]
     items = getattr(sheet, key)
     return [Paragraph(t(item), bullet, bulletText="•") for item in items]
 
 
 def _cards(sheet: StudySheet, theme: Theme, styles: ui.Styles, keys, width: float) -> list:
-    """Cards for the given section keys that have content."""
+    """Cards for the given section keys that have content.
+
+    The overview is a bare lead paragraph (no heading): it is read first and
+    needs no label.
+    """
     cards = []
     for key in keys:
         rows = _rows(key, sheet, theme, styles)
-        if rows:
-            cards.append(ui.section_card(theme.sections[key], rows, width, theme, styles))
+        if not rows:
+            continue
+        cards.append(rows[0] if key == "overview"
+                     else ui.section_card(theme.sections[key], rows, width, theme, styles))
     return cards
 
 

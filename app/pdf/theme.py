@@ -28,12 +28,11 @@ class FontSet:
 
 @dataclass(frozen=True)
 class SectionStyle:
-    """Heading text, icon and colours of one kind of section."""
+    """Heading text and colours of one kind of section."""
     label: str
-    icon: str            # an icon name understood by components.Icon
-    accent: str          # heading, icon and border colour
-    tint: str            # card background
-    callout: bool = False  # highlighted box (stronger border)
+    accent: str            # heading, heading rule and bullet colour
+    tint: str = ""         # background of a callout box; unused for open sections
+    callout: bool = False  # tinted box, kept for the recall sections (remember, summary)
 
 
 def _font_candidates() -> tuple[tuple[str, str], ...]:
@@ -85,26 +84,32 @@ class Theme:
     title_size: float = 19.0
     heading_size: float = 10.5
     body_size: float = 9.4
+    lead_size: float = 11.0         # the overview, read first under the title
     min_body_size: float = 8.0
     footer_size: float = 7.0
-    corner_radius: float = 2.6 * mm
+    corner_radius: float = 1.2 * mm
 
-    primary: str = "#1B7F5A"        # LearnerTutors green
-    primary_tint: str = "#E7F4EC"
-    text: str = "#1F2A33"
-    muted: str = "#5E6B75"
-    rule: str = "#D5DDE2"
+    # "Fresh study" palette, built with UI Color Palette (OKLCH, Tailwind stops).
+    # One core colour (teal) carries structure, one accent (coral) is kept for
+    # "Remember this" only; everything else is slate neutrals. Contrast on white:
+    # primary 8.8:1, accent 5.0:1, text 16.5:1, muted 6.5:1 (all WCAG AA or better).
+    primary: str = "#005454"        # Teal 700: headings, heading rules, bullets
+    primary_tint: str = "#EDF5F5"   # very light teal: summary box
+    accent: str = "#C14530"         # Coral 500: the one accent
+    accent_tint: str = "#FCEEEA"    # very light coral: "Remember this" box
+    text: str = "#182026"           # Slate 900
+    muted: str = "#545F68"          # Slate 600
+    rule: str = "#CED9E2"           # Slate 100: hairlines only, never text
 
     sections: dict[str, SectionStyle] = field(default_factory=lambda: {
-        "overview": SectionStyle("Topic overview", "info", "#1B7F5A", "#E7F4EC", callout=True),
-        "key_concepts": SectionStyle("Key concepts", "star", "#0E7C86", "#E5F3F4"),
-        "definitions": SectionStyle("Important definitions", "book", "#2F6DB0", "#EAF1F9"),
-        "main_points": SectionStyle("Main points", "list", "#3C7D2E", "#EEF6EA"),
-        "examples": SectionStyle("Examples & applications", "arrow", "#6B4FB0", "#F1EDF9"),
-        "formulas": SectionStyle("Formulas & equations", "formula", "#3446A8", "#ECEEF9"),
-        "remember": SectionStyle("Remember this", "alert", "#B86E00", "#FFF3DD", callout=True),
-        "summary": SectionStyle("Quick revision summary", "check", "#1B7F5A", "#E7F4EC",
-                                callout=True),
+        "overview": SectionStyle("Topic overview", "#005454"),
+        "key_concepts": SectionStyle("Key concepts", "#005454"),
+        "definitions": SectionStyle("Important definitions", "#005454"),
+        "main_points": SectionStyle("Main points", "#005454"),
+        "examples": SectionStyle("Examples & applications", "#005454"),
+        "formulas": SectionStyle("Formulas & equations", "#005454"),
+        "remember": SectionStyle("Remember this", "#C14530", "#FCEEEA", callout=True),
+        "summary": SectionStyle("Quick revision summary", "#005454", "#EDF5F5", callout=True),
     })
     font_pairs: tuple[tuple[str, str], ...] = field(default_factory=_font_candidates)
     symbol_fonts: tuple[str, ...] = field(default_factory=_symbol_candidates)

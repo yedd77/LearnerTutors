@@ -120,7 +120,7 @@ def _migrate_retrieval_metadata(collection):
         if not ids:
             break
 
-        update_ids = []
+        update_ids = [] 
         update_metadatas = []
 
         for chunk_id, metadata in zip(ids, metadatas):

@@ -118,7 +118,9 @@ def test_sufficient_material_returns_a_downloadable_one_page_pdf(client, auth, s
     doc = pymupdf.open(stream=response.content, filetype="pdf")
     assert doc.page_count == 1
     text = doc[0].get_text()
-    for expected in ("Photosynthesis", "Topic overview", "Key concepts", "Important definitions",
+    # The overview is a lead paragraph without a heading, so check its text.
+    for expected in ("Photosynthesis", "Plants convert light energy", "Key concepts",
+                     "Important definitions",
                      "Formulas & equations", "Remember this", "Quick revision summary",
                      "Biology_0.pdf", "Page 1 of 1", "LearnerTutors"):
         assert expected in text, expected
