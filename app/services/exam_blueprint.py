@@ -304,6 +304,18 @@ def set_enabled(course_id: int, document_id: str, enabled: bool) -> bool:
     return True
 
 
+def document_course(document_id: str) -> int | None:
+    """The course that stored a blueprint under this document id, or None."""
+    if not BLUEPRINT_ROOT.is_dir():
+        return None
+    for path in BLUEPRINT_ROOT.glob("*.json"):
+        record = _read(path)
+        if record and record.get("document_id") == str(document_id) \
+                and isinstance(record.get("course_id"), int):
+            return record["course_id"]
+    return None
+
+
 def course_blueprints(course_id: int) -> list[ExamBlueprint]:
     """This course's enabled blueprints, most recently updated first.
 

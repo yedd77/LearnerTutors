@@ -150,13 +150,42 @@ ChatResponse.model_rebuild()  # resolve the forward references above
 
 
 class IndexResponse(BaseModel):
-    """Result of indexing a document, including any generated starter suggestions."""
+    """Result of indexing a document, including any generated starter suggestions.
+
+    A past exam paper (``document_role="past_exam"``) is not embedded
+    (``indexed_chunks`` is 0); ``exam_blueprint`` describes the structure that
+    was detected. Both fields are omitted for ordinary course material.
+    """
     document_id: str
     filename: str
     course_id: int
     indexed_chunks: int
     status: str
     suggestions: list[str] = Field(default_factory=list)
+    document_role: str | None = None
+    exam_blueprint: "ExamBlueprintSummary | None" = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_extras(self, handler):
+        """Leave the past-paper fields out for ordinary uploads (response unchanged)."""
+        data = handler(self)
+        for key in ("document_role", "exam_blueprint"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
+class ExamBlueprintSummary(BaseModel):
+    """What the backend detected in a past paper: the structure as data plus a
+    plain-text description Moodle can show the lecturer. No question text."""
+    description: str
+    question_count: int
+    total_marks: float | None = None
+    duration_minutes: int | None = None
+    sections: list[dict]
+
+
+IndexResponse.model_rebuild()  # resolve the ExamBlueprintSummary forward reference
 
 
 class DeleteResponse(BaseModel):

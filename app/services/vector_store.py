@@ -299,6 +299,14 @@ def set_document_retrieval(
 
     return len(ids)
 
+def document_course(document_id: str) -> int | None:
+    """The course that owns a document's chunks, or None when nothing is indexed for it."""
+    found = get_collection().get(where={"document_id": str(document_id)}, limit=1,
+                                 include=["metadatas"])
+    metadatas = found.get("metadatas") or []
+    course = (metadatas[0] or {}).get("course_id") if metadatas else None
+    return int(course) if course is not None else None
+
 # Get the retrieval status of a document's chunks.
 def get_document_retrieval_status(document_id: str) -> dict:
     """Report how many chunks of a document are searchable (for verification)."""

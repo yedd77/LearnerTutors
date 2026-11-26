@@ -13,18 +13,21 @@ from pydantic import BaseModel
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.config import get_settings
-from app.schemas import DeleteResponse, IndexResponse
+from app.schemas import DeleteResponse, ExamBlueprintSummary, IndexResponse
 from app.security import RequireApiKey
 from app.services import document_images
+from app.services import exam_blueprint as blueprints
 from app.services.chunker import chunk_sections
 from app.services.document_parser import SUPPORTED_EXTENSIONS, DocumentParseError, extract_sections
 from app.services.suggestion_generator import (
     generate_document_suggestions,
     generate_one_document_suggestion,
 )
+from app.services.llm_provider import ProviderError
 from app.services.vector_store import (
     DocumentCourseConflictError,
     delete_document,
+    document_course,
     index_document,
     set_document_retrieval,
 )
@@ -79,13 +82,18 @@ def index_upload(
     visibility: Annotated[str | None, Form()] = None,
     retrieval_enabled: Annotated[bool, Form()] = True,
     generate_suggestions: Annotated[bool, Form()] = False,
+    document_role: Annotated[str | None, Form(max_length=40)] = None,
 ):
     """Parse, chunk, embed and store one course document, replacing any earlier version.
 
     Optionally generates three starter-question suggestions afterwards; a
     suggestion failure is logged but never fails the indexing request.
-    Errors: 400 (visibility/empty), 409 (document_id belongs to another course),
-    413 (size or chunk limit), 415 (type), 422 (unparseable), 502 (embedding/store).
+    ``document_role="past_exam"`` stores only the paper's structure for /exam
+    instead (see ``_index_past_exam``); omitted or ``"course_material"`` is the
+    normal path.
+    Errors: 400 (visibility/role/empty), 409 (document_id belongs to another course),
+    413 (size or chunk limit), 415 (type), 422 (unparseable or not an exam paper),
+    502 (embedding/store/analysis).
     """
     s = get_settings()
     # Personal (student-owned) uploads were removed. Require an explicit course
@@ -96,14 +104,23 @@ def index_upload(
             400,
             "Personal document uploads are not supported; visibility must be 'course'.",
         )
+    role = document_role or blueprints.COURSE_MATERIAL_ROLE
+    if role not in blueprints.DOCUMENT_ROLES:
+        raise HTTPException(400, "document_role must be 'course_material' or 'past_exam'.")
 
     started = time.perf_counter()
     filename = _upload_filename(file)
     logger.info(
-        "document.index.start document=%s course=%s filename=%s visibility=%s",
-        document_id, course_id, filename, visibility,
+        "document.index.start document=%s course=%s filename=%s visibility=%s role=%s",
+        document_id, course_id, filename, visibility, role,
     )
     content = _read_upload(file, filename)
+    other_course = blueprints.document_course(document_id)
+    if other_course is not None and other_course != course_id:
+        raise HTTPException(409, f"Document '{document_id}' belongs to another course.")
+    if role == blueprints.PAST_EXAM_ROLE:
+        return _index_past_exam(document_id, course_id, filename, content, retrieval_enabled,
+                                started)
 
     parse_started = time.perf_counter()
     try:
@@ -145,6 +162,9 @@ def index_upload(
         "document.vector_index.finish document=%s indexed_chunks=%s duration_ms=%.2f",
         document_id, count, (time.perf_counter() - index_started) * 1000,
     )
+    # The document is course material now; it no longer shapes /exam papers.
+    if blueprints.delete_blueprint(course_id, document_id):
+        logger.info("document.exam_blueprint.removed document=%s reason=role_changed", document_id)
 
     # Figures are optional: a failure is logged and never fails indexing.
     try:
@@ -180,6 +200,69 @@ def index_upload(
         indexed_chunks=count,
         status="ready",
         suggestions=suggestions,
+    )
+
+
+def _blueprint_summary(blueprint: blueprints.ExamBlueprint) -> ExamBlueprintSummary:
+    """The detected structure as returned to Moodle."""
+    return ExamBlueprintSummary(
+        description=blueprints.describe(blueprint),
+        question_count=blueprint.question_count(),
+        total_marks=blueprint.total_marks,
+        duration_minutes=blueprint.duration_minutes,
+        sections=[section.model_dump(mode="json") for section in blueprint.sections],
+    )
+
+
+def _index_past_exam(document_id: str, course_id: int, filename: str, content: bytes,
+                     enabled: bool, started: float) -> IndexResponse:
+    """Store a past paper's structure for /exam. The paper is never embedded.
+
+    An unchanged file (same SHA-256) reuses its stored blueprint without an LLM
+    call, so a Moodle reindex costs nothing. Any vectors and figures left from
+    an earlier upload of this document as course material are removed, so the
+    paper's questions can never be retrieved in chat. ``enabled`` mirrors
+    ``retrieval_enabled``: a disabled paper does not shape /exam papers.
+    Errors: 409 (document_id indexed in another course), 422 (unparseable or
+    not an exam paper), 502 (analysis failed; details are logged, not returned).
+    """
+    indexed_course = document_course(document_id)
+    if indexed_course is not None and indexed_course != course_id:
+        raise HTTPException(409, f"Document '{document_id}' belongs to another course.")
+    try:
+        sections = extract_sections(filename, content)
+    except DocumentParseError as exc:
+        logger.warning("document.parse.error document=%s filename=%s error=%s", document_id, filename, exc)
+        raise HTTPException(422, str(exc)) from exc
+
+    sha256 = blueprints.content_hash(content)
+    blueprint = blueprints.stored_blueprint(course_id, document_id, sha256)
+    reused = blueprint is not None
+    if blueprint is None:
+        analysis_started = time.perf_counter()
+        try:
+            blueprint = blueprints.analyse_paper(filename, sections)
+        except blueprints.NotAnExamPaper as exc:
+            logger.info("document.exam_blueprint.not_exam document=%s", document_id)
+            raise HTTPException(422, "This document does not look like an exam paper, "
+                                     "so no exam structure was saved.") from exc
+        except (ProviderError, ValueError):
+            logger.exception("document.exam_blueprint.error document=%s", document_id)
+            raise HTTPException(502, "Exam structure analysis failed. Please try again later.")
+        logger.info("document.exam_blueprint.analysed document=%s sections=%s questions=%s "
+                    "duration_ms=%.2f", document_id, len(blueprint.sections),
+                    blueprint.question_count(), (time.perf_counter() - analysis_started) * 1000)
+
+    # A past paper must never be searchable: drop any earlier course-material copy.
+    removed = delete_document(document_id, course_id)
+    document_images.delete_document_images(course_id, document_id)
+    blueprints.save_blueprint(course_id, document_id, filename, sha256, blueprint, enabled)
+    logger.info("document.index.finish document=%s role=past_exam reused=%s removed_chunks=%s "
+                "total_ms=%.2f", document_id, reused, removed, (time.perf_counter() - started) * 1000)
+    return IndexResponse(
+        document_id=document_id, filename=filename, course_id=course_id, indexed_chunks=0,
+        status="ready", suggestions=[], document_role=blueprints.PAST_EXAM_ROLE,
+        exam_blueprint=_blueprint_summary(blueprint),
     )
 
 
@@ -257,13 +340,17 @@ def generate_one_suggestion(
 
 @router.delete("/{document_id}", response_model=DeleteResponse)
 def remove_document(document_id: str, course_id: int):
-    """Delete every chunk of a document, scoped to its course (404 if none matched)."""
+    """Delete every chunk of a document, scoped to its course (404 if none matched).
+
+    A past exam paper has no chunks; deleting it removes its stored structure.
+    """
     try:
         count = delete_document(document_id, course_id)
         document_images.delete_document_images(course_id, document_id)
+        had_blueprint = blueprints.delete_blueprint(course_id, document_id)
     except Exception as exc:
         raise HTTPException(500, f"Deletion failed: {exc}") from exc
-    if count == 0:
+    if count == 0 and not had_blueprint:
         raise HTTPException(404, "Document not found in this course.")
     return DeleteResponse(document_id=document_id, deleted_chunks=count, status="deleted")
 
@@ -279,19 +366,23 @@ def toggle_retrieval(
     course_id: int,
     request: RetrievalToggleRequest,
 ):
-    """Enable or disable a document for chat retrieval without deleting its vectors."""
+    """Enable or disable a document for chat retrieval without deleting its vectors.
+
+    For a past exam paper this includes or excludes it from /exam papers.
+    """
     try:
         count = set_document_retrieval(
             document_id,
             course_id,
             request.enabled,
         )
+        is_paper = blueprints.set_enabled(course_id, document_id, request.enabled)
     except Exception as exc:
         raise HTTPException(
             500,
             f"Failed to update retrieval setting: {exc}",
         ) from exc
-    if count == 0:
+    if count == 0 and not is_paper:
         raise HTTPException(404, "Document not found in this course.")
 
     return {
