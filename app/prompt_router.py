@@ -1,4 +1,5 @@
 """Pick the prompt tool for a chat message (explicit tool, slash command or wording)."""
+from collections.abc import Iterable
 from dataclasses import dataclass
 import re
 from typing import Optional
@@ -8,10 +9,15 @@ from app.prompt_registry import TOOLS, ToolDefinition, get_tool
 # Route a message to the correct tool based on its content
 @dataclass(frozen=True)
 class RouteResult:
-    """The chosen tool, the message text to use (slash command removed), and how it was chosen."""
+    """The chosen tool, the message text to use (slash command removed), and how it was chosen.
+
+    ``blocked`` is True when the student explicitly asked for a tool that this
+    request disabled (``tool_id`` or its slash command); the tool must not run.
+    """
     tool: ToolDefinition
     question: str
     explicit_command: bool
+    blocked: bool = False
 
 
 # Natural-language patterns, checked in order against the lower-cased message.
@@ -31,7 +37,8 @@ _PATTERN_ROUTES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-def route_message(message: str, requested_tool_id: Optional[str] = None) -> RouteResult:
+def route_message(message: str, requested_tool_id: Optional[str] = None,
+                  disabled_tools: Iterable[str] = ()) -> RouteResult:
     """Choose a tool for ``message``, in priority order.
 
     1. ``requested_tool_id`` from Moodle (unknown IDs raise ValueError); the
@@ -40,13 +47,22 @@ def route_message(message: str, requested_tool_id: Optional[str] = None) -> Rout
     3. The first matching pattern in ``_PATTERN_ROUTES``.
     4. The default ``ask`` tool.
 
+    ``disabled_tools`` (from Moodle, e.g. ``["exam_generation"]`` when /exam is
+    off for the course) are never used: an explicit tool_id or slash command of a
+    disabled tool returns a ``blocked`` result with the text unchanged, and a
+    pattern that points to a disabled tool is skipped so the next pattern (or
+    ``ask``) applies.
+
     Routing is local and rule-based; it never calls an LLM.
     """
     text = (message or "").strip()
+    disabled = frozenset(disabled_tools)
 
     # Use the explicitly requested tool if provided
     if requested_tool_id:
         tool = get_tool(requested_tool_id)
+        if tool.id in disabled:
+            return RouteResult(tool=tool, question=text, explicit_command=True, blocked=True)
         # Avoid accidentally dropping text unless this is the selected tool's command.
         if tool.command and text.lower().startswith(tool.command.lower()):
             text = text[len(tool.command):].lstrip()
@@ -58,12 +74,22 @@ def route_message(message: str, requested_tool_id: Optional[str] = None) -> Rout
     rest = parts[1] if len(parts) > 1 else ""
     for tool in TOOLS.values():
         if tool.command and first.lower() == tool.command.lower():
+            if tool.id in disabled:
+                return RouteResult(tool=tool, question=text, explicit_command=True, blocked=True)
             return RouteResult(tool=tool, question=rest.strip(), explicit_command=True)
 
     # Check for patterns that indicate a specific tool should be used
     lower = text.lower()
     for tool_id, patterns in _PATTERN_ROUTES:
+        if tool_id in disabled:
+            continue
         if any(re.search(pattern, lower) for pattern in patterns):
             return RouteResult(get_tool(tool_id), text, False)
 
     return RouteResult(get_tool("ask"), text, False)
+
+
+def disabled_message(tool: ToolDefinition) -> str:
+    """Plain reply when a request asks for a tool that is turned off in the course."""
+    name = f"The {tool.command} command" if tool.command else f"The {tool.label} tool"
+    return f"{name} is turned off in this course."

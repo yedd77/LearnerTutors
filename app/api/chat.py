@@ -17,7 +17,7 @@ from app.services import study_sheet as sheets
 from app.services.llm_provider import ProviderError
 from app.services.illustrations import generate_illustration_async
 from app.prompt_registry import get_tool, get_tool_menu
-from app.prompt_router import RouteResult, route_message
+from app.prompt_router import RouteResult, disabled_message, route_message
 from app.rag_graph.context import RagContext
 from app.rag_graph.graph import run_rag_graph
 from app.rag_graph.nodes import _aux_messages
@@ -232,6 +232,9 @@ async def ask(request: ChatRequest, http_request: Request):
     when the material is too thin (no pending action, no illustration).
     ``/exam`` in a course with past-paper blueprints returns a practice paper PDF
     as ``download`` (no answer key); without blueprints it is a normal answer.
+    ``disabled_tools`` (e.g. ``["exam_generation"]``) are never run: an explicit
+    tool_id or slash command of one gets a plain "turned off" answer, and a
+    wording match falls through to the next route.
     Errors: 502 provider failure, 422 invalid input, 500 otherwise.
     """
     settings = get_settings()
@@ -262,6 +265,7 @@ async def ask(request: ChatRequest, http_request: Request):
             route = route_message(
                 request.question,
                 requested_tool_id=request.tool_id,
+                disabled_tools=request.disabled_tools,
             )
             logger.info(
                 "chat.route id=%s tool=%s explicit=%s duration_ms=%.2f",
@@ -270,6 +274,11 @@ async def ask(request: ChatRequest, http_request: Request):
                 route.explicit_command,
                 (time.perf_counter() - route_started) * 1000,
             )
+        # A tool Moodle turned off for this request never runs, including one a
+        # pending action would resume.
+        if route.blocked or route.tool.id in request.disabled_tools:
+            logger.info("chat.route.disabled id=%s tool=%s", request_id, route.tool.id)
+            return ChatResponse(answer=disabled_message(route.tool), sources=[])
         question = route.question.strip()
         if not question:
             raise HTTPException(

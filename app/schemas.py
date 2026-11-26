@@ -35,6 +35,25 @@ class ChatRequest(BaseModel):
     # Only this explicit pair counts as consent; a free-text "yes" is a normal message.
     pending_action_token: str | None = Field(default=None, max_length=4096)
     pending_decision: Literal["approve", "decline"] | None = None
+    # Tool ids this request must never use, e.g. ["exam_generation"] when Moodle has
+    # turned /exam off for the user in this course. Omitted or [] changes nothing.
+    disabled_tools: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("disabled_tools")
+    @classmethod
+    def known_disableable_tools(cls, value: list[str]) -> list[str]:
+        """Only known tool ids (max 80 chars each); "ask" is the fallback and cannot be disabled."""
+        from app.prompt_registry import TOOLS
+
+        cleaned = []
+        for item in value:
+            tool_id = item.strip()
+            if len(tool_id) > 80 or tool_id not in TOOLS:
+                raise ValueError(f"Unsupported tool_id in disabled_tools: {tool_id[:80]}")
+            if tool_id == "ask":
+                raise ValueError("The 'ask' tool cannot be disabled.")
+            cleaned.append(tool_id)
+        return list(dict.fromkeys(cleaned))
 
     @field_validator("question")
     @classmethod
